@@ -20,8 +20,8 @@ def json_ver_validate(json_data):
     if 'Header' not in json_data:
         return False
     header = json_data['Header']
-    if "WolvenKitVersion" in header and "8.13" not in header["WolvenKitVersion"]:
-        if "8.14" not in header["WolvenKitVersion"]:
+    if "WolvenKitVersion" in header and "8.14" not in header["WolvenKitVersion"]:
+        if "8.15" not in header["WolvenKitVersion"]:
             return False
     if "MaterialJsonVersion" in header:
         if "1." not in header["MaterialJsonVersion"]:

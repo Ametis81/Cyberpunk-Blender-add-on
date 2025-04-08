@@ -508,7 +508,7 @@ class Multilayered:
             # Node for blending colorscale color with diffuse texture of mltemplate
             # Changed from multiply to overlay because multiply is a darkening blend mode, and colors appear too dark. Overlay is still probably wrong - jato
             if colorScale != "null" and colorScale != "null_null":
-                ColorScaleMixN = create_node(NG.nodes,"ShaderNodeMixRGB",(-1400,100),blend_type='MIX')
+                ColorScaleMixN = create_node(NG.nodes,"ShaderNodeMixRGB",(-1400,100),blend_type='MULTIPLY')
                 ColorScaleMixN.inputs[0].default_value=1
                 if 'logos' in BaseMat.name:
                     ColorScaleMixN.blend_type='MULTIPLY'
@@ -519,6 +519,13 @@ class Multilayered:
             MBN = create_node(NG.nodes,"ShaderNodeTexImage",(-2300,-800),image = MBI,label = "Microblend")
 
             # Flips normal map when mb normal strength is negative - invert RG channels
+            RGBCurvesConvertMB = create_node(NG.nodes, "ShaderNodeRGBCurve", (-2000,-500))
+            RGBCurvesConvertMB.label = "Convert DX to OpenGL Normal"
+            RGBCurvesConvertMB.hide = True
+            RGBCurvesConvertMB.mapping.curves[1].points[0].location = (0,1)
+            RGBCurvesConvertMB.mapping.curves[1].points[1].location = (1,0)
+            RGBCurvesConvertMB.width = 150
+            
             MBRGBCurveN = create_node(NG.nodes,"ShaderNodeRGBCurve",(-1700,-350))
             MBRGBCurveN.mapping.curves[0].points[0].location = (0,1)
             MBRGBCurveN.mapping.curves[0].points[1].location = (1,0)
@@ -549,6 +556,9 @@ class Multilayered:
             # Hides mb normal map where mask is fully opaque/white/1
             MBNormSubtractMask = create_node(NG.nodes, "ShaderNodeMath", (-1200, -250), operation = 'SUBTRACT')
             MBNormSubtractMask.use_clamp = True
+            MBNormSubtractMask.inputs[0].default_value = 1.0
+            
+            MBNormMultMask = create_node(NG.nodes, "ShaderNodeMath", (-1000, -250), operation = 'MULTIPLY')
 
             # Final microblend normal map node
             MBNormalN = create_node(NG.nodes,"ShaderNodeNormalMap", (-750,-200))
@@ -656,9 +666,9 @@ class Multilayered:
 
             NG.links.new(MBTexCord.outputs[2],MBMapping.inputs[0])
             NG.links.new(MBUVCombine.outputs[0],MBMapping.inputs[1])
-            NG.links.new(MBMapping.outputs[0],MBN.inputs[0])
-            NG.links.new(MBN.outputs[0],MBRGBCurveN.inputs[1])
-            NG.links.new(MBN.outputs[0],MBMixN.inputs[2])
+            NG.links.new(MBN.outputs[0],RGBCurvesConvertMB.inputs[1])
+            NG.links.new(RGBCurvesConvertMB.outputs[0],MBRGBCurveN.inputs[1])
+            NG.links.new(RGBCurvesConvertMB.outputs[0],MBMixN.inputs[2])
             NG.links.new(MBN.outputs[1],MaskLinearBurnAdd.inputs[1])
 
             NG.links.new(MBCSubtract.outputs[0],MaskMBMix.inputs[0])
@@ -687,8 +697,9 @@ class Multilayered:
             NG.links.new(MBRGBCurveN.outputs[0],MBMixN.inputs[1])
             NG.links.new(MBMixN.outputs[0],MBNormalN.inputs[1])
             NG.links.new(MBNormMultiply.outputs[0],MBNormAbsN.inputs[0])
-            NG.links.new(MBNormAbsN.outputs[0],MBNormSubtractMask.inputs[0])
-            NG.links.new(MBNormSubtractMask.outputs[0],MBNormalN.inputs[0])
+            NG.links.new(MBNormAbsN.outputs[0],MBNormMultMask.inputs[1])
+            NG.links.new(MBNormSubtractMask.outputs[0], MBNormMultMask.inputs[0])
+            NG.links.new(MBNormMultMask.outputs[0], MBNormalN.inputs[0])
             NG.links.new(MBNormalN.outputs[0],NormSubN.inputs[0])
             NG.links.new(GeoN.outputs['Normal'],NormSubN.inputs[1])
             NG.links.new(NormSubN.outputs[0],NormalCombineN.inputs[1])

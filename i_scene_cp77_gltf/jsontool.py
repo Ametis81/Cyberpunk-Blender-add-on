@@ -36,9 +36,18 @@ class JSONTool:
             return False
         if 'Header' not in json_data:
             return False
-        header = json_data['Header']
-        if "WolvenKitVersion" in header and "8.13" not in header["WolvenKitVersion"]:
-            if "8.15" not in header["WolvenKitVersion"] and "8.16" not in header["WolvenKitVersion"] and "8.17" not in header["WolvenKitVersion"]:
+        if "WolvenKitVersion" in header:
+            ver_str = str(header.get("WolvenKitVersion", ""))
+            match = re.search(r'\b(\d+)\.(\d+)', ver_str)
+            if match:
+                major = int(match.group(1))
+                minor = int(match.group(2))
+
+                if major == 8 and minor < 13:
+                    return False
+                if major < 8:
+                    return False
+            else:
                 return False
         if "MaterialJsonVersion" in header:
             if "1." not in header["MaterialJsonVersion"]:

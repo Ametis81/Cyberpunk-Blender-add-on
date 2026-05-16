@@ -4,19 +4,12 @@ from typing import Callable, Dict, Iterable
 
 # Handlers
 from ..material_types.multilayered import Multilayered
-from ..material_types.multilayeredclearcoat import MultilayeredClearCoat
-from ..material_types.vehicledestrblendshape import VehicleDestrBlendshape
 from ..material_types.skin import Skin
 from ..material_types.meshdecal import MeshDecal
-from ..material_types.meshdecaldoublediffuse import MeshDecalDoubleDiffuse
-from ..material_types.vehiclemeshdecal import VehicleMeshDecal
 from ..material_types.vehiclelights import VehicleLights
 from ..material_types.metalbase import MetalBase
-from ..material_types.metalbasedet import MetalBaseDet
 from ..material_types.hair import Hair
-from ..material_types.meshdecalgradientmaprecolor import MeshDecalGradientMapReColor
 from ..material_types.eye import Eye
-from ..material_types.eyegradient import EyeGradient
 from ..material_types.eyeshadow import EyeShadow
 from ..material_types.meshdecalemissive import MeshDecalEmissive
 from ..material_types.glass import Glass
@@ -28,6 +21,7 @@ from ..material_types.parallaxscreentransparent import ParallaxScreenTransparent
 from ..material_types.speedtree import SpeedTree
 from ..material_types.decal import Decal
 from ..material_types.decal_gradientmap_recolor import DecalGradientmapRecolor
+from ..material_types.decal_gradientmap_recolor_emissive import DecalGradientmapRecolorEmissive
 from ..material_types.televisionad import TelevisionAd
 from ..material_types.window_parallax_interior_proxy import windowParallaxIntProx
 from ..material_types.hologram import Hologram
@@ -86,17 +80,13 @@ REGISTRY.register([
     "base\\materials\\mesh_decal_blendable.mt",
     "base\\materials\\mesh_decal_wet_character.mt",
     "base\\materials\\mesh_decal_revealed.mt",
+    "base\\materials\\mesh_decal_double_diffuse.mt",
+    "base\\materials\\mesh_decal_gradientmap_recolor.mt",
+    "base\\materials\\mesh_decal_gradientmap_recolor_blendable.mt",
     "base\\fx\\_shaders\\blackwall_blendable_mesh_decal.mt",
     "base\\fx\\_shaders\\blackwall_blendable_mesh_decal_gradient.mt",
-], MaterialRule(factory=_factory_bip_enablemask(MeshDecal), no_shadows=True))
-
-REGISTRY.register([
-    "base\\materials\\mesh_decal_double_diffuse.mt",
-], MaterialRule(factory=_factory_bi(MeshDecalDoubleDiffuse), no_shadows=True))
-
-REGISTRY.register([
     "base\\materials\\vehicle_mesh_decal.mt",
-], MaterialRule(factory=_factory_bip_enablemask(VehicleMeshDecal), no_shadows=True))
+], MaterialRule(factory=_factory_bip_enablemask(MeshDecal), no_shadows=True))
 
 # Vehicle lights
 REGISTRY.register([
@@ -119,12 +109,9 @@ REGISTRY.register([
     "base\\materials\\metal_base_parallax.mt",
     "base\\materials\\metal_base_gradientmap_recolor.mt",
     "base\\fx\\_shaders\\blackwall_blendable_metal_base.mt",
-], MaterialRule(factory=_factory_bip_enablemask(MetalBase)))
-
-REGISTRY.register([
     "base\\materials\\metal_base_det.mt",
     "base\\materials\\lights_interactive.mt",
-], MaterialRule(factory=_factory_bip(MetalBaseDet)))
+], MaterialRule(factory=_factory_bip_enablemask(MetalBase)))
 
 # PBR layer
 REGISTRY.register([
@@ -138,25 +125,15 @@ REGISTRY.register([
     "base\\fx\\_shaders\\blackwall_blendable_hair.mt",
 ], MaterialRule(factory=_factory_bip(Hair)))
 
-# Mesh decal gradient map recolor
-REGISTRY.register([
-    "base\\materials\\mesh_decal_gradientmap_recolor.mt",
-    "base\\materials\\mesh_decal_gradientmap_recolor_blendable.mt",
-], MaterialRule(factory=_factory_bip(MeshDecalGradientMapReColor), no_shadows=True))
-
 # Eye
 REGISTRY.register([
     "base\\materials\\eye.mt",
     "base\\materials\\eye_blendable.mt",
     "base\\fx\\_shaders\\blackwall_blendable_eye.mt",
-], MaterialRule(factory=_factory_bip(Eye)))
-
-# Eye gradient
-REGISTRY.register([
     "base\\materials\\eye_gradient.mt",
     "base\\materials\\eye_gradient_blendable.mt",
     "base\\fx\\_shaders\\blackwall_blendable_eye_gradient.mt",
-], MaterialRule(factory=_factory_bip(EyeGradient)))
+], MaterialRule(factory=_factory_bip(Eye)))
 
 # Eye shadow
 REGISTRY.register([
@@ -214,6 +191,7 @@ REGISTRY.register([
     "base\\materials\\speedtree_3d_v8_twosided.mt",
     "base\\materials\\speedtree_3d_v8_onesided.mt",
     "base\\materials\\speedtree_3d_v8_seams.mt",
+    "base\\materials\\ver_skinned_mov.mt",
 ], MaterialRule(factory=_factory_bip(SpeedTree)))
 
 # Television Ad
@@ -257,5 +235,9 @@ DECAL_REGISTRY.register([
 DECAL_REGISTRY.register([
     "base\\materials\\decal_gradientmap_recolor.mt",
 ], MaterialRule(factory=_factory_bip(DecalGradientmapRecolor)))
+
+DECAL_REGISTRY.register([
+    "base\\materials\\decal_gradientmap_recolor_emissive.mt",
+], MaterialRule(factory=_factory_bip(DecalGradientmapRecolorEmissive)))
 
 

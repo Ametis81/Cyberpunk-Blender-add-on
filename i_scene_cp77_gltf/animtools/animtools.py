@@ -1,79 +1,245 @@
 import bpy
 import json
 import re
-from mathutils import Vector, Euler, Quaternion
 from ..importers.read_rig import *
-from ..main.bartmoss_functions import store_current_context, restore_previous_context, get_safe_mode, safe_mode_switch, is_armature
+from ..main.bartmoss_functions import safe_mode_switch, store_current_context, restore_previous_context
+
+animBones = [
+    "Hips", "Spine", "Spine1", "Spine2", "Spine3",
+    "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand", "WeaponLeft",
+    "LeftInHandThumb", "LeftHandThumb1", "LeftHandThumb2",
+    "LeftInHandIndex", "LeftHandIndex1", "LeftHandIndex2", "LeftHandIndex3",
+    "LeftInHandMiddle", "LeftHandMiddle1", "LeftHandMiddle2", "LeftHandMiddle3",
+    "LeftInHandRing", "LeftHandRing1", "LeftHandRing2", "LeftHandRing3",
+    "LeftInHandPinky", "LeftHandPinky1", "LeftHandPinky2", "LeftHandPinky3",
+    "RightShoulder", "RightArm", "RightForeArm", "RightHand", "WeaponRight",
+    "RightInHandThumb", "RightHandThumb1", "RightHandThumb2",
+    "RightInHandIndex", "RightHandIndex1", "RightHandIndex2", "RightHandIndex3",
+    "RightInHandMiddle", "RightHandMiddle1", "RightHandMiddle2", "RightHandMiddle3",
+    "RightInHandRing", "RightHandRing1", "RightHandRing2", "RightHandRing3",
+    "RightInHandPinky", "RightHandPinky1", "RightHandPinky2", "RightHandPinky3",
+    "Neck", "Neck1", "Head", "LeftEye", "RightEye",
+    "LeftUpLeg", "LeftLeg", "LeftFoot", "LeftHeel", "LeftToeBase",
+    "RightUpLeg", "RightLeg", "RightFoot", "RightHeel", "RightToeBase"
+]
+
+def CP77AnimsList(self, context):
+    for action in bpy.data.actions:
+        if action.library:
+            continue
+        yield action
+
+def _assign_action(adt, action):
+    adt.action = action
+
+    if not hasattr(adt, 'action_slot'):
+        return
+
+    suitable = getattr(adt, 'action_suitable_slots', ())
+    if suitable:
+        adt.action_slot = suitable[0]
+        return
+
+    slots = getattr(action, 'slots', None)
+    if slots is not None:
+        try:
+            slot = slots.new(id_type='OBJECT')
+            adt.action_slot = slot
+        except Exception as e:
+            print(f"[CP77] Could not create action slot: {e}")
 
 
-animBones = ["Hips", "Spine", "Spine1", "Spine2", "Spine3", "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand", "WeaponLeft", "LeftInHandThumb", "LeftHandThumb1", "LeftHandThumb2", "LeftInHandIndex", "LeftHandIndex1", "LeftHandIndex2", "LeftHandIndex3", "LeftInHandMiddle", "LeftHandMiddle1", "LeftHandMiddle2", "LeftHandMiddle3", "LeftInHandRing", "LeftHandRing1", "LeftHandRing2", "LeftHandRing3", "LeftInHandPinky", "LeftHandPinky1", "LeftHandPinky2", "LeftHandPinky3", "RightShoulder", "RightArm", "RightForeArm", "RightHand", "WeaponRight", "RightInHandThumb", "RightHandThumb1", "RightHandThumb2", "RightInHandIndex", "RightHandIndex1", "RightHandIndex2", "RightHandIndex3", "RightInHandMiddle", "RightHandMiddle1", "RightHandMiddle2", "RightHandMiddle3", "RightInHandRing", "RightHandRing1", "RightHandRing2", "RightHandRing3", "RightInHandPinky", "RightHandPinky1", "RightHandPinky2", "RightHandPinky3", "Neck", "Neck1", "Head", "LeftEye", "RightEye", "LeftUpLeg", "LeftLeg", "LeftFoot", "LeftHeel", "LeftToeBase", "RightUpLeg", "RightLeg", "RightFoot", "RightHeel", "RightToeBase"]
-
-
-def delete_unused_bones(self, context):
+def reset_armature(self, context):
     obj = context.active_object
-    current_context = bpy.context.mode
+    if not obj or obj.type != 'ARMATURE':
+        self.report({'ERROR'}, "Active object must be an armature.")
+        return {'CANCELLED'}
 
-
-    cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
-
-
-    # get all vertex groups from all children
-    all_vertex_groups = {vg.name for mesh in (child for child in obj.children if child.type == 'MESH') for vg in mesh.vertex_groups}
-
-    # Delete bones that aren't in the list
-    o = bpy.context.object
-    bpy.ops.object.mode_set(mode='EDIT')
-
-    b = obj.data.edit_bones[0]
-
-    # for rigs, these are nested - otherwise, just iterate
-    allBones = b.children_recursive
-    if len(allBones) == 0:
-        allBones = obj.data.edit_bones
-
-    for bone in allBones:
-        m = re.search(r'\.\d+$', bone.name) # drop numbers from bone names
-        if m is not None:
-            bone.name = bone.name.replace(m[0], "")
-        if bone.name in all_vertex_groups:
-           continue
-
-        if not cp77_addon_prefs.non_verbose:
-            print(f"Deleting bone {bone.name}")
-        bpy.context.object.data.edit_bones.remove(bone)
-
-
-    if current_context != bpy.context.mode:
-        bpy.ops.object.mode_set(mode=current_context)
+    reset_count = 0
+    for pose_bone in obj.pose.bones:
+        pose_bone.matrix_basis.identity()
+        reset_count += 1
 
     return {'FINISHED'}
 
-## function to reset the armature to its neutral position
-def reset_armature(self, context):
-    obj = context.active_object
-    current_context = bpy.context.mode
+def create_track_properties(armature_obj, rig, apply_defaults: bool = True):
+    if not armature_obj or armature_obj.type != 'ARMATURE':
+        return
 
-    # Store the original object mode
-    original_object_mode = obj.mode
+    track_names = [
+        str(n) if not isinstance(n, dict) else n.get('$value', '')
+        for n in rig.track_names
+    ]
+
+    defaults = rig.reference_tracks if hasattr(rig, 'reference_tracks') else None
+
+    for i, track_name in enumerate(track_names):
+        if not track_name:
+            continue
+
+        default_value = 0.0
+        if defaults is not None and i < len(defaults):
+            default_value = float(defaults[i])
+
+        if track_name not in armature_obj:
+            armature_obj[track_name] = default_value if apply_defaults else 0.0
+            try:
+                ui = armature_obj.id_properties_ui(track_name)
+                ui.update(
+                        description=f"Facial track {i}: {track_name}",
+                        default=default_value,
+                        min=0.0,
+                        max=1.0,
+                        soft_min=0.0,
+                        soft_max=1.0,
+                        subtype='FACTOR'
+                        )
+            except Exception as e:
+                print(f"Warning: Could not set UI for {track_name}: {e}")
+        elif apply_defaults:
+            armature_obj[track_name] = default_value
+
+def cp77_keyframe(self, context, frameall=False):
+    current_context = bpy.context.mode
+    armature = context.active_object
+
+    if not armature or armature.type != 'ARMATURE':
+        self.report({'ERROR'}, "Active object must be an armature.")
+        return {'CANCELLED'}
+
+    if current_context != 'POSE':
+        try:
+            bpy.ops.object.mode_set(mode='POSE')
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to switch to pose mode: {e}")
+            return {'CANCELLED'}
 
     try:
-        if current_context != 'POSE':
-            # Switch to pose mode
-            bpy.ops.object.mode_set(mode='POSE')
+        if not frameall:
+            bpy.ops.anim.keyframe_insert_by_name(type="WholeCharacterSelected")
+            self.report({'INFO'}, "Keyframe inserted at current frame.")
+            return {'FINISHED'}
+        else:
+            if not armature.animation_data or not armature.animation_data.action:
+                self.report({'ERROR'}, "Armature has no animation data or action.")
+                return {'CANCELLED'}
 
-        # Deselect all bones first
-        for pose_bone in obj.pose.bones:
-            pose_bone.bone.select = False
+            action = armature.animation_data.action
+            frame_start = int(action.frame_range[0])
+            frame_end = int(action.frame_range[1])
+            step = getattr(context.scene, 'cp77_keyframe_step', 1)
+            original_frame = context.scene.frame_current
 
-        # Select all bones in pose mode
-        for pose_bone in obj.pose.bones:
-            pose_bone.bone.select = True
+            keyframe_count = 0
+            for frame in range(frame_start, frame_end + 1, step):
+                context.scene.frame_set(frame)
+                bpy.ops.anim.keyframe_insert_by_name(type="WholeCharacterSelected")
+                keyframe_count += 1
 
-        # Clear transforms for all selected bones
-        bpy.ops.pose.transforms_clear()
+            context.scene.frame_set(original_frame)
+            self.report({'INFO'}, f"Inserted keyframes at {keyframe_count} frames.")
+            return {'FINISHED'}
+
+    except Exception as e:
+        self.report({'ERROR'}, f"Keyframe insertion failed: {e}")
+        return {'CANCELLED'}
+
     finally:
-        # Restore the original object mode
-        bpy.ops.object.mode_set(mode=original_object_mode)
+        if bpy.context.mode != current_context:
+            try:
+                bpy.ops.object.mode_set(mode=current_context)
+            except Exception:
+                pass
+
+def remap_action_to_armature(source_action, armature_obj):
+    new_action = source_action.copy()
+    new_action.name = source_action.name + "_REMAPPED_" + armature_obj.name
+
+    bone_prefix = 'pose.bones["'
+    bone_prefix_alt = "pose.bones['"
+
+    for fcurve in new_action.fcurves:
+        dp = fcurve.data_path
+        if dp.startswith(bone_prefix) or dp.startswith(bone_prefix_alt):
+            try:
+                bone_name = dp.split('"')[1] if '"' in dp else dp.split("'")[1]
+            except:
+                continue
+
+            if bone_name not in armature_obj.pose.bones:
+                continue
+
+            suffix = dp.split(']')[1]
+            new_data_path = f'pose.bones["{bone_name}"]{suffix}'
+            fcurve.data_path = new_data_path
+        elif dp.startswith('["') or dp.startswith("[\'"):
+            pass
+        else:
+            pass
+    return new_action
+
+def play_anim(self, context, anim_name: str):
+    obj = context.active_object
+    if obj is None or obj.type != 'ARMATURE':
+        self.report({'ERROR'}, "Active object must be an armature.")
+        return {'CANCELLED'}
+
+    action = bpy.data.actions.get(anim_name)
+    if action is None:
+        self.report({'ERROR'}, f"Action '{anim_name}' not found.")
+        return {'CANCELLED'}
+
+    if obj.animation_data is None:
+        obj.animation_data_create()
+
+    _assign_action(obj.animation_data, action)
+
+    context.view_layer.objects.active = obj
+
+    scene = context.scene
+    start, end = int(action.frame_range[0]), int(action.frame_range[1])
+    if end <= start:
+        end = start + 1
+    scene.frame_start = start
+    scene.frame_end   = end
+    if not (start <= scene.frame_current <= end):
+        scene.frame_current = start
+
+    screen = context.screen
+    if screen and screen.is_animation_playing:
+        bpy.ops.screen.animation_cancel(restore_frame=False)
+
+    wm = context.window_manager
+    override_kwargs = None
+    _ANIM_AREA_TYPES = {'VIEW_3D', 'TIMELINE', 'DOPESHEET_EDITOR',
+                        'GRAPH_EDITOR', 'NLA_EDITOR'}
+
+    for window in wm.windows:
+        scr = window.screen
+        for area in scr.areas:
+            if area.type not in _ANIM_AREA_TYPES:
+                continue
+            for region in area.regions:
+                if region.type == 'WINDOW':
+                    override_kwargs = {
+                        'window':     window,
+                        'screen':     scr,
+                        'area':       area,
+                        'region':     region,
+                        'scene':      context.scene,
+                        'view_layer': context.view_layer,
+                    }
+                    break
+            if override_kwargs:
+                break
+        if override_kwargs:
+            break
+
+    if override_kwargs is not None:
+        with context.temp_override(**override_kwargs):
+            bpy.ops.screen.animation_play()
+    else:
+        bpy.ops.screen.animation_play()
 
     return {'FINISHED'}
 
@@ -91,11 +257,11 @@ def load_apose(self, arm_obj):
     rig_data = read_rig(filepath)
     apose_ms = rig_data.apose_ms
     apose_ls = rig_data.apose_ls
-    
+
     if apose_ms is None and apose_ls is None:
         self.report({'ERROR'}, f"No A-Pose found in {rig_data.rig_name} json source")
         return
-    
+
     bone_index_map = {}
     for i, name in enumerate(rig_data.bone_names):
         bone = edit_bones.get(name)
@@ -103,7 +269,6 @@ def load_apose(self, arm_obj):
     pose_matrices = build_apose_matrices(apose_ms, apose_ls, bone_names, bone_parents)
     if not pose_matrices:
         self.report({'ERROR'}, f"Error building A-Pose matrices for {rig_data.rig_name}")
-        print
         return
     for i, name in enumerate(rig_data.bone_names):
         mat = pose_matrices[i]
@@ -117,18 +282,15 @@ def load_tpose(self, arm_obj):
     store_current_context()
     safe_mode_switch('EDIT')
     edit_bones = arm_data.edit_bones
-    # Make sure the path exists
     if not os.path.exists(filepath):
         self.report({'ERROR'}, f"Invalid path to json source {filepath} not found")
         return
-    #Load Fresh Data
     rig_data = read_rig(filepath)
     bone_index_map = {}
     for i, name in enumerate(rig_data.bone_names):
         bone = edit_bones.get(name)
         bone_index_map[i] = bone
-        print(f'index{i} = {bone.name} = {bone}')
-    
+
     global_transforms = {}
     for i in range(len(rig_data.bone_names)):
         mat_red = compute_global_transform(i, rig_data.bone_transforms, rig_data.parent_indices, global_transforms)
@@ -136,118 +298,89 @@ def load_tpose(self, arm_obj):
     for i in range(len(rig_data.bone_transforms)):
         transform_data = rig_data.bone_transforms[i]
         if is_identity_transform(transform_data):
-            continue  # leave stub alone
+            continue
         apply_bone_from_matrix(i, global_transforms[i], bone_index_map, rig_data.parent_indices, global_transforms)
         arm_data['T-Pose'] = True
     restore_previous_context()
-    
-    self.report({'INFO'}, "A-Pose loaded")
+
+    self.report({'INFO'}, "T-Pose loaded")
     return
 
-## insert a keyframe at either the corrunt frame or for the entire specified frame length
-def cp77_keyframe(self, context, frameall=False):
-
-    ##Check the current context of the scene
-    current_context = bpy.context.mode
-    armature = context.active_object
-
-    ## switch to pose mode if it's not already
-    if current_context != 'POSE':
-        bpy.ops.object.mode_set(mode='POSE')
-
-    if not frameall:
-        bpy.ops.anim.keyframe_insert_by_name(type="WholeCharacterSelected")
-        return {'FINISHED'}
-
-    else:
-        action = armature.animation_data.action
-        if action:
-            # Make sure the armature is in pose mode
-            bpy.context.view_layer.objects.active = armature
-            bpy.ops.object.mode_set(mode='POSE')
-
-            # Insert a keyframe for each frame in the action
-            for frame in range(int(action.frame_range[0]), int(action.frame_range[1]) + 1):
-                bpy.context.scene.frame_set(frame)
-                bpy.ops.anim.keyframe_insert_by_name(type="WholeCharacterSelected")
-            bpy.ops.object.mode_set(current_context)
-
-        if current_context != bpy.context.mode:
-            bpy.context.mode = current_context
-
-        return {'FINISHED'}
-
-
-def play_anim(self, context, anim_name):
-    obj = bpy.context.active_object
-
-    if not obj or obj.type != 'ARMATURE':
-        return {'CANCELLED'}
-
-    if not obj.animation_data:
-        return {'CANCELLED'}
-
-    # Retrieve the action by name
-    active_action = bpy.data.actions.get(anim_name)
-
-    if active_action:
-        # Stop the currently playing animation
-        bpy.ops.screen.animation_cancel(restore_frame=False)
-
-        # Set the active action
-        obj.animation_data.action = active_action
-
-        # Start playing the animation
-        bpy.ops.screen.animation_play()
-
-    return {'FINISHED'}
-
-
 def delete_anim(self, context):
+    if not hasattr(self, 'name'):
+        return {'CANCELLED'}
+
     action = bpy.data.actions.get(self.name, None)
     if not action:
         return {'CANCELLED'}
-    else:
-        bpy.data.actions.remove(action)
 
+    try:
+        bpy.data.actions.remove(action)
+        return {'FINISHED'}
+    except Exception:
+        return {'CANCELLED'}
+
+def _set_bone_visibility(armature_object, hide_state, bone_filter=None):
+    if not armature_object:
+        return
+
+    armature_data = armature_object.data
+
+    for bone in armature_object.pose.bones:
+        if bone_filter is None or bone.name in bone_filter:
+            bone.hide = hide_state
+    for bone in armature_data.bones:
+        if bone_filter is None or bone.name in bone_filter:
+            bone.hide = hide_state
 
 def hide_extra_bones(self, context):
     selected_object = context.active_object
 
-    if selected_object is not None and selected_object.type == 'ARMATURE':
-        armature = selected_object.data
-    else:
+    if not selected_object or selected_object.type != 'ARMATURE':
         print("Select an armature object.")
-        armature = None
+        return
 
-    for bone in armature.bones:
-        if bone.name not in animBones:
-            if bone.hide is not True:
-                bone.hide = True
+    bones_to_hide = [
+        b.name for b in selected_object.pose.bones
+        if b.name not in animBones
+        ]
 
-    for bone in armature.edit_bones:
-        if bone.name not in animBones:
-            if bone.hide is not True:
-                bone.hide = True
-
+    _set_bone_visibility(selected_object, True, bones_to_hide)
+    selected_object.update_tag()
     selected_object['deformBonesHidden'] = True
 
+    if hasattr(self, 'report'):
+        self.report({'INFO'}, f"Hidden {len(bones_to_hide)} extra bones")
+    else:
+        print(f"Hidden {len(bones_to_hide)} extra bones")
 
 def unhide_extra_bones(self, context):
     selected_object = context.active_object
 
-    if selected_object is not None and selected_object.type == 'ARMATURE':
-        armature = selected_object.data
-    else:
+    if not selected_object or selected_object.type != 'ARMATURE':
         print("Select an armature object.")
-        armature = None
+        return
 
-    for bone in armature.bones:
-        if bone.hide == True:
-            bone.hide = False
+    _set_bone_visibility(selected_object, False, None)
+    selected_object.update_tag()
 
-    for bone in armature.edit_bones:
-        if bone.hide == True:
-            bone.hide = False
+    try:
+        bpy.ops.wm.properties_remove(data_path="object", property_name="deformBonesHidden")
+    except Exception:
+        if 'deformBonesHidden' in selected_object:
+            del selected_object['deformBonesHidden']
 
-    bpy.ops.wm.properties_remove(data_path="object", property_name="deformBonesHidden")
+    print("Unhidden all bones")
+
+def get_animation_bones():
+    return animBones.copy()
+
+def is_animation_bone(bone_name):
+    return bone_name in animBones
+
+def validate_armature(obj):
+    if not obj or obj.type != 'ARMATURE':
+        return False
+    if not obj.data or not obj.data.bones:
+        return False
+    return True

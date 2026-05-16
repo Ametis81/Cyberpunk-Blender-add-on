@@ -12,7 +12,7 @@ from ..main.setup import MaterialBuilder
 from ..main.bartmoss_functions import UV_by_bounds
 from .import_from_external import *
 from .attribute_import import manage_garment_support
-from ..cyber_props import add_anim_props
+from ..cyber_props import add_anim_props, add_skin_props
 from ..jsontool import JSONTool
 from ..main.common import show_message
 from ..animtools.tracks import import_anim_tracks, fix_anim_frame_alignment
@@ -327,13 +327,13 @@ def reload_mats(self, context):
         self.report({'ERROR'}, 'Selected object has no materials')
         return {'CANCELLED'}
 
+    active_material = active_obj.active_material
     mat_idx = active_obj.active_material_index
-    mat = active_obj.material_slots[mat_idx].material
-    old_mat_name = mat.name
+    old_mat_name = active_material.name
 
-    DepotPath = mat.get('DepotPath')
-    BasePath = mat.get('MeshPath')
-    ProjPath = mat.get('ProjPath')
+    DepotPath = active_material.get('DepotPath')
+    BasePath = active_material.get('MeshPath')
+    ProjPath = active_material.get('ProjPath')
 
     # JATO: This is a workaround to get MeshPath from collection for old assets before we stored MeshPath within material.
     if BasePath is None:
@@ -376,16 +376,16 @@ def reload_mats(self, context):
     bpy.data.materials[old_mat_name].user_remap(bpy.data.materials[newmat.name])
 
     # JATO: Copy custom material properties from old mat to new mat. Maybe we could regenerate from file, but I'm having a hard time understanding the code for that within import_mats function
-    for k in mat.keys():
+    for k in active_material.keys():
         if k in ('BaseMaterial','DiffuseMap','GlobalNormal','MultilayerMask'):
-            newmat[k] = mat[k]
+            newmat[k] = active_material[k]
 
     # JATO: may be unnecessary
     active_obj.active_material_index = mat_idx
 
     # JATO: Removing the old material appears to cause a crash TODO: fix context?
-    if mat:
-        bpy.data.materials.remove(mat, do_unlink=True, do_id_user=True, do_ui_user=True)
+    if active_material:
+        bpy.data.materials.remove(active_material, do_unlink=True, do_id_user=True, do_ui_user=True)
 
     newmat.name = old_mat_name
 
@@ -395,13 +395,15 @@ def reload_mats(self, context):
     if len(errorMessages) > 0:
         show_message("\n".join(errorMessages))
 
-def import_mats(BasePath, DepotPath, exclude_unused_mats, existingMeshes, gltf_importer, image_format, mats, validmats,multimesh=False,generate_overrides=False):
+def import_mats(BasePath, DepotPath, exclude_unused_mats, existingMeshes, gltf_importer, image_format, mats, validmatnames,multimesh=False,generate_overrides=False):
     failedon = []
     cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
     start_time = time.time()
-    for mat in validmats.keys():
+    validmats = {}
+    for mat in validmatnames.keys():
         for m in mats: #obj['Materials']:
             if 'Name' not in m.keys():
+                # Sometimes a material has no name, for now we continue out, but we should figure out why
                 continue
             if m['Name'] != mat:
                 continue
@@ -416,6 +418,10 @@ def import_mats(BasePath, DepotPath, exclude_unused_mats, existingMeshes, gltf_i
                     MultilayerMask = 'None'
                 if 'DiffuseMap' in m['Data'].keys():
                     DiffuseMap = m['Data']['DiffuseMap']
+                elif 'BaseColor' in m['Data'].keys():
+                    DiffuseMap = m['Data']['BaseColor']
+                elif 'DiffuseTexture' in m['Data'].keys():
+                    DiffuseMap = m['Data']['DiffuseTexture']
                 else:
                     DiffuseMap = 'None'
 
@@ -461,18 +467,10 @@ def import_mats(BasePath, DepotPath, exclude_unused_mats, existingMeshes, gltf_i
 
             # print('matname: ',matname, validmats[matname])
             m = validmats[matname]
-
+            if matname=='decal_diffuse1':
+                print('debug')
             # Should create a list of mis that dont play nice with this and just check if the mat is using one.
-            if matname in bpy_mats.keys() and 'glass' not in matname and 'MaterialTemplate' not in matname and 'Window' not in matname \
-                 and matname[:5] != 'Atlas' and 'decal_diffuse' not in matname and \
-                'BaseMaterial' in bpy_mats[matname].keys() and bpy_mats[matname]['BaseMaterial'] == m['BaseMaterial'] and \
-                    bpy_mats[matname]['GlobalNormal'] == m['GlobalNormal'] and bpy_mats[matname]['MultilayerMask'] == m['MultilayerMask']:
-                bpy.data.meshes[name].materials.append(bpy_mats[matname])
-            elif matname in bpy_mats.keys() and matname[:5] == 'Atlas' and bpy_mats[matname][
-                'BaseMaterial'] == m['BaseMaterial'] and bpy_mats[matname]['DiffuseMap'] == m['DiffuseMap']:
-                bpy.data.meshes[name].materials.append(bpy_mats[matname])
-            elif matname in bpy_mats.keys() and matname=='decal_diffuse' and bpy_mats[matname]['BaseMaterial'] == m['BaseMaterial'] and \
-                bpy_mats[matname]['DiffuseTexture'] == m['DiffuseTexture']:
+            if ( matname in bpy_mats.keys() and 'm' in bpy_mats[matname].keys() and dict(bpy_mats[matname]['m']) == m ):
                 bpy.data.meshes[name].materials.append(bpy_mats[matname])
             elif matname in validmats.keys():
                 index = 0
@@ -483,16 +481,20 @@ def import_mats(BasePath, DepotPath, exclude_unused_mats, existingMeshes, gltf_i
                     try:
                         bpymat = Builder.create(mats, index)
                         if bpymat:
+                            bpymat['m']=m
                             bpymat['BaseMaterial'] = validmats[matname]['BaseMaterial']
                             bpymat['GlobalNormal'] = validmats[matname]['GlobalNormal']
                             bpymat['MultilayerMask'] = validmats[matname]['MultilayerMask']
-                            bpymat['DiffuseMap'] = validmats[matname]['DiffuseMap']
+                            if 'DiffuseMap' in validmats[matname].keys():
+                                bpymat['DiffuseMap'] = validmats[matname]['DiffuseMap']
+                            if 'DiffuseTexture' in validmats[matname].keys():
+                                bpymat['DiffuseTexture'] = validmats[matname]['DiffuseTexture']
                             bpy.data.meshes[name].materials.append(bpymat)
                             if 'no_shadows' in bpymat.keys() and bpymat['no_shadows'] and name in bpy.data.objects.keys():
                                 bpy.data.objects[name].visible_shadow = False
                     except:
                         # Kwek -- finally, even if the Builder couldn't find the materials, keep calm and carry on
-                        print(traceback.print_exc())
+                        print(traceback.format_exc())
                         failedon.append(matname)
                         pass
 
@@ -531,6 +533,7 @@ def blender_4_scale_armature_bones():
 
 def import_meshes_and_anims(collection, gltf_importer, hide_armatures, o, filename, oldanims, import_tracks):
     # TODO: check if this is a Cyberpunk import or something else entirely
+    cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
 
     for parent in o.users_collection:
         parent.objects.unlink(o)
@@ -540,6 +543,17 @@ def import_meshes_and_anims(collection, gltf_importer, hide_armatures, o, filena
     animations = gltf_importer.data.animations
     meshes = gltf_importer.data.meshes
 
+    if o.type == 'ARMATURE' and hasattr(gltf_importer.data, 'skins') and gltf_importer.data.skins:
+        for skin in gltf_importer.data.skins:
+            try:
+                add_skin_props(skin, o)
+                if not cp77_addon_prefs.non_verbose:
+                    print(f"Skin properties added to armature: {o.name}")
+                break  # typically one skin per armature
+            except Exception as e:
+                if not cp77_addon_prefs.non_verbose:
+                    print(f"could not add skin properties to '{o.name}': {e}")
+
     # if animations exist, don't hide the armature and get the extras properties
     if animations:
         get_anim_info(animations, oldanims, import_tracks)
@@ -548,4 +562,3 @@ def import_meshes_and_anims(collection, gltf_importer, hide_armatures, o, filena
     elif meshes and o.type == 'ARMATURE':
         o.hide_set(hide_armatures)
         o.name = "Armature__" + filename
-

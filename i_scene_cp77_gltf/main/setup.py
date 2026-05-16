@@ -3,19 +3,12 @@ import bpy
 import os
 import sys
 from ..material_types.multilayered import Multilayered
-from ..material_types.multilayeredclearcoat import MultilayeredClearCoat
-from ..material_types.vehicledestrblendshape import VehicleDestrBlendshape
 from ..material_types.skin import Skin
 from ..material_types.meshdecal import MeshDecal
-from ..material_types.meshdecaldoublediffuse import MeshDecalDoubleDiffuse
-from ..material_types.vehiclemeshdecal import VehicleMeshDecal
 from ..material_types.vehiclelights import VehicleLights
 from ..material_types.metalbase import MetalBase
-from ..material_types.metalbasedet import MetalBaseDet
 from ..material_types.hair import Hair
-from ..material_types.meshdecalgradientmaprecolor import MeshDecalGradientMapReColor
 from ..material_types.eye import Eye
-from ..material_types.eyegradient import EyeGradient
 from ..material_types.eyeshadow import EyeShadow
 from ..material_types.meshdecalemissive import MeshDecalEmissive
 from ..material_types.glass import Glass
@@ -68,6 +61,13 @@ class MaterialBuilder:
             bpyMat['MaterialTemplate'] = rawMat["MaterialTemplate"]
             bpyMat['AddonVersion'] = self.addon_ver
             bpyMat.use_nodes = True
+            if len(bpyMat.node_tree.nodes) ==0:
+                out = bpyMat.node_tree.nodes.new('ShaderNodeOutputMaterial')
+                out.location = (400,0)
+                bpyMat.node_tree.nodes.new('ShaderNodeBsdfPrincipled')
+                bpyMat.node_tree.links.new(bpyMat.node_tree.nodes['Material Output'].inputs['Surface'], bpyMat.node_tree.nodes['Principled BSDF'].outputs['BSDF'])
+            #if bpy.app.version[0] > 4:
+            #    bpyMat.node_tree.nodes["Principled BSDF"].inputs['IOR'].default_value = 1.01  # REMOVE THIS WHEN THEY FIX 5.0 
             no_shadows=False
             material_template = rawMat["MaterialTemplate"].replace('/','\\')
             rule = REGISTRY.resolve(material_template)

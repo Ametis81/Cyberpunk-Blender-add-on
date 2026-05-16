@@ -31,29 +31,58 @@ class CP77_PT_MeshTools(Panel):
     def draw(self, context):
         layout = self.layout
         box = layout.box()
-        box.operator("cp77.rotate_obj", text="Rotate Selected Objects")
-        box = layout.box()
         props = context.scene.cp77_panel_props
 
         cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
         if not cp77_addon_prefs.show_modtools or not cp77_addon_prefs.show_meshtools:
             return
 
-        box.label(icon_value=get_icon("SCULPT"), text="Modelling:")
+        # store control flags for display logic below
+        has_meshes_selected = bpy.context.selected_objects and len([obj for obj in bpy.context.selected_objects if obj.type == 'MESH']) > 1
+        has_mesh_selected = (context.active_object and context.active_object.type == 'MESH')
+        has_armature_selected = (context.active_object and context.active_object.type == 'ARMATURE')
+
+        if has_armature_selected:
+
+            col = box.column()
+            col.label(text="Clean up Armature", icon_value=get_icon("ARMATURE"))
+            col.operator('delete_unused_bones.cp77', text='Delete unused bones')
+
+        if not (has_mesh_selected or has_meshes_selected):
+            box.label(icon_value=get_icon("SCULPT"), text="Select a mesh")
+            return
         col = box.column()
         col.operator("cp77.set_armature", text="Change Armature Target")
-        if context.active_object and context.active_object.type == 'MESH' and context.object.active_material and context.object.active_material.name == 'UV_Checker':
+
+        if context.object.active_material and context.object.active_material.name == 'UV_Checker':
             col.operator("cp77.uv_unchecker",  text="Remove UV Checker")
         else:
             col.operator("cp77.uv_checker", text="Apply UV Checker")
-        col.operator("cp77.trans_weights", text="Weight Transfer Tool")
+
+        # Modelling
+        box.label(icon_value=get_icon("SCULPT"), text="Modelling:")
+        col = box.column()
+
         col.operator("cp77.shrinkwrap", text="GarmentSupport/Decal")
 
-        if context.active_object and len([obj for obj in bpy.context.selected_objects if obj.type == 'MESH']) > 1:
-            col.operator("cp77.safe_join", text="Join Meshes")
-        elif context.active_object and context.active_object.type == 'MESH' and context.active_object.data.materials and any(mat.name.startswith('submesh_') for mat in context.active_object.data.materials if mat):
-            col.operator("cp77.safe_split", text="Split into submeshes")
+        col.operator("cp77.trans_weights", text="Weight Transfer Tool")
 
+        if has_mesh_selected and context.active_object.data.materials and any(mat.name.startswith('submesh_') for mat in context.active_object.data.materials if mat):
+            col.operator("cp77.safe_split", text="Split into submeshes")
+        elif has_meshes_selected:
+            col.operator("cp77.safe_join", text="Join Meshes")
+
+        # Mirror
+        box = layout.box()
+        box.label(text="Mirror Tools", icon_value=get_icon("MIRROR"))
+        col = box.column()
+
+        col.operator("cp77.mirror_x_axis", text="Safely mirror")
+        col.operator("cp77.mirror_vertex_groups", text="Mirror Vertex Groups")
+
+        box.operator("cp77.rotate_obj", text="Rotate Selected Objects")
+
+        # Cleanup
         box = layout.box()
         box.label(text="Mesh Cleanup", icon_value=get_icon("TRAUMA"))
         col = box.column()
@@ -61,11 +90,13 @@ class CP77_PT_MeshTools(Panel):
         col.operator("cp77.group_verts", text="Group Ungrouped Verts")
         col.operator("cp77.del_empty_vgroup", text="Delete Unused Vert Groups")
 
+        # Autofitter
         box = layout.box()
         box.label(text="AKL Autofitter", icon_value=get_icon("REFIT"))
         col = box.column()
         col.operator("cp77.auto_fitter", text="Refit Selected Meshes")
 
+        # Vertex colours
         box = layout.box()
         box.label(text="Vertex Colours", icon="BRUSH_DATA")
         col = box.column()
@@ -216,7 +247,7 @@ class CP77GarmentSupport(Operator):
     def invoke(self, context, event):
         try:
             context.scene.vertex_group_props.presets = ''  # Reset to trigger refresh
-        except Exception as e:
+        except:
             pass
 
         return context.window_manager.invoke_props_dialog(self)
@@ -279,9 +310,9 @@ class CP77SafeJoin(Operator):
     bl_description = "Join selected meshes while preserving submesh information"
     bl_options = {'REGISTER', 'UNDO'}
 
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
-
+    # Show a confirmation window before triggering the function
+    # def invoke(self, context, event):
+    #     return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
         result = safe_join(self, context)
@@ -293,8 +324,9 @@ class CP77SafeSplit(Operator):
     bl_description = "Split selected mesh back into submeshes"
     bl_options = {'REGISTER', 'UNDO'}
 
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
+    # Show a confirmation window before triggering the function
+    # def invoke(self, context, event):
+    #     return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
         result = safe_split(self, context)
@@ -334,7 +366,7 @@ class CP77WeightTransfer(Operator):
 
     def execute(self, context):
         # Call the trans_weights function with the provided arguments
-        result = trans_weights(self, context, self.properties.vertInterop ) #, self.properties.bySubmesh)
+        trans_weights(self, context, self.properties.vertInterop, self.properties.bySubmesh)
         return {"FINISHED"}
 
     def draw(self,context):
@@ -654,6 +686,88 @@ class CP77RotateObj(Operator):
         rotate_quat_180(self, context)
         return {'FINISHED'}
 
+class CP77_OT_MirrorVertexGroups(Operator):
+    bl_idname = "cp77.mirror_vertex_groups"
+    bl_label = "Mirror vertex groups"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+
+        if context.object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        selected_meshes = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+        if not selected_meshes:
+            show_message("No meshes selected")
+            return {'CANCELLED'}
+
+        num_replaced = 0
+        for mesh in selected_meshes:
+            num_replaced = num_replaced + mirror_vertex_groups(mesh)
+
+        self.report({'INFO'}, f'Mirrored {num_replaced} vertex groups.')
+        return {'FINISHED'}
+
+class CP77_OT_MirrorXAxis(Operator):
+    bl_idname = "cp77.mirror_x_axis"
+    bl_label = "Safely mirror across X axis"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        # Store initial mode to restore later
+        initial_mode = context.object.mode if context.object else 'OBJECT'
+
+        if context.object and context.object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        if not selected_meshes:
+            show_message("No meshes selected")
+            return {'CANCELLED'}
+
+        num_replaced = 0
+        for obj in selected_meshes:
+            # Select only the current object
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+
+            # Mirror across X axis using negative scale
+            bpy.ops.transform.resize(
+                value=(-1, 1, 1),
+                orient_type='GLOBAL',
+                constraint_axis=(True, False, False),
+                mirror=True  # This ensures proper mirroring of vertices
+            )
+
+            # Apply transforms to bake the negative scale
+            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+
+            # Flip normals in edit mode
+            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.mesh.select_all(action='SELECT')
+            bpy.ops.mesh.flip_normals()
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            num_replaced += mirror_vertex_groups(obj)
+
+        # Restore initial mode
+        if context.object:
+            bpy.ops.object.mode_set(mode=initial_mode)
+
+        self.report({'INFO'}, f'Mirrored {num_replaced} vertex groups across {len(selected_meshes)} mesh(es)')
+        return {'FINISHED'}
+
+class CP77DeleteUnusedBones(Operator):
+    bl_idname = "delete_unused_bones.cp77"
+    bl_parent_id = "CP77_PT_animspanel"
+    bl_label = "Delete unused bones"
+    bl_description = "Delete all bones that aren't used by meshes parented to the armature"
+
+    def execute(self, context):
+        delete_unused_bones(self, context)
+        return {"FINISHED"}
+
 operators, other_classes = get_classes(sys.modules[__name__])
 
 def register_meshtools():
@@ -669,10 +783,8 @@ def register_meshtools():
 
 def unregister_meshtools():
     for cls in reversed(other_classes):
-        if hasattr(bpy.types, cls.__name__):
-            bpy.utils.unregister_class(cls)
+        bpy.utils.unregister_class(cls)
     for cls in reversed(operators):
-        if hasattr(bpy.types, cls.__name__):
-            bpy.utils.unregister_class(cls)
+        bpy.utils.unregister_class(cls)
 
     del bpy.types.Scene.vertex_group_props

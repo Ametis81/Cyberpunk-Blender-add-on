@@ -14,14 +14,16 @@ import bmesh
 from ..main.common import *
 from ..jsontool import JSONTool
 from .phys_import import cp77_phys_import
-from ..collisiontools.collisions import draw_box_collider, draw_capsule_collider, draw_convex_collider, draw_sphere_collider
+from ..collisiontools.pxbridge.io_phys import import_collider_as_actor
 from io_scene_gltf2.io.imp.gltf2_io_gltf import glTFImporter
-
+from .import_common import *
+from bpy_extras import anim_utils
 
 
 def create_axes(ent_coll,name):
     if name not in ent_coll.objects.keys():
         o = bpy.data.objects.new( name , None )
+
         ent_coll.objects.link( o )
         o.empty_display_size = .5
         o.empty_display_type = 'PLAIN_AXES'
@@ -33,10 +35,10 @@ def create_axes(ent_coll,name):
 
 # The appearance list needs to be the appearanceNames for each ent that you want to import, will import all if not specified
 # if you've already imported the body/head and set the rig up you can exclude them by putting them in the exclude_meshes list
-#presto_stash=[]
+# presto_stash=[]
 
-def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], include_collisions=False, include_phys=False, 
-                   include_entCollider=False, inColl='', remapdepot=False, meshes=None, mesh_jsons=None, escaped_path=None, 
+def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], include_collisions=False, include_phys=False,
+                   include_entCollider=False, inColl='', remapdepot=False, meshes=None, mesh_jsons=None, escaped_path=None,
                    app_path=None, anim_files=None, rigjsons=None,generate_overrides=False):
     cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
     with_materials = with_materials
@@ -63,7 +65,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
             print(f"Importing appearance: {appearances} from entity: {ent_name}")
     if filepath is not None:
         ent_apps, ent_components, ent_component_data, res, ent_default = JSONTool.jsonload(filepath, error_messages)
-    
+
     ent_applist=[]
     for app in ent_apps:
         ent_applist.append(app['appearanceName']['$value'])
@@ -71,9 +73,30 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
     if len(ent_applist) == 0:
         print(f"No appearances found in entity file {ent_name}. Imported objects may be incomplete or missing.")
         #show_message("No appearances found in entity file. Imported objects may be incomplete or missing. "+ent_name)
-        # this just isnt true, loads of stuff doesnt have appaearances, and the popup is annoying
+        # this just isnt true, loads of stuff doesnt have appearances, and the popup is annoying
 
     #print(ent_applist)
+
+    for appidx,app in enumerate(appearances):
+        if app not in ent_applist and app.upper() !='ALL' and app !='default':
+            print(f"Appearance {app} not found in entity {ent_name}. Available appearances: {', '.join(ent_applist)}")
+            #show_message(f"Appearance {app} not found in entity {ent_name}. Available appearances: {', '.join(ent_applist)}")
+            # this check is not actually checking all the options for how the app name is stored so its popping this up then loading it fine.
+        if app not in ent_applist and app.upper() !='ALL' and app =='default':
+            if ent_default and len(ent_default)>0 and ent_default!='None':
+                print(f"Using default appearance {ent_default} for entity {ent_name}.")
+                appearances[appidx]=ent_default
+                print(appearances)
+            else:                
+                if len(ent_applist)>0:
+                    print(f"No default appearance specified in entity {ent_name}. Using first available appearance {ent_applist[0]}.")
+                    app=ent_applist[0]
+                else:
+                    print(f"No appearances specified in entity {ent_name}. Using root entities.")    
+                    appearances[0]= 'BASE_COMPONENTS_ONLY'          
+                    app='BASE_COMPONENTS_ONLY'
+
+
     #presto_stash.append(ent_components)
     ent_complist=[]
     ent_rigs=[]
@@ -123,13 +146,13 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
     if not app_path:
         app_path = glob.glob(os.path.join(escaped_path,"**","*.app.json"), recursive = True)
     if len(app_path)==0:
-        print('No Appearance file JSONs found in path')
+        print('No Appearance file JSONs found in path, run the Ent export script first')
 
     # find the meshes
     if not meshes:
         meshes =  glob.glob(os.path.join(escaped_path,"**","*.glb"), recursive = True)
     if len(meshes)==0:
-        print('No Meshes found in path')
+        print('No Meshes found in path, run the Ent export script first')
     if not mesh_jsons:
         mesh_jsons =  glob.glob(os.path.join(escaped_path,"**","*mesh.json"), recursive = True)
 
@@ -195,40 +218,22 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
         pass
 
     else:
+        coll_scene = C.scene.collection
+        mis={}
+        if "MasterInstances" not in coll_scene.children.keys():
+            Masters=bpy.data.collections.new("MasterInstances")
+            coll_scene.children.link(Masters)
+        else:
+            Masters=bpy.data.collections.get("MasterInstances")
+
+        Masters.hide_viewport=False #if its hidden it breaks entity positioning for some reason?!?
+
+        # loop through the appearances we want to import to find & load the meshes/appearances we need
+        meshes={}
+        app_comps={}
+        ent_chunks={}
         for x,app_name in enumerate(appearances):
-            print(f"\nImporting appearance {x+1} of {len(appearances)}: {app_name}")
-            app_start_time = time.time()
-            ent_coll = bpy.data.collections.new(ent_name+'_'+app_name)
-            if inColl and inColl in coll_scene.children.keys():
-                par_coll=bpy.data.collections.get(inColl)
-                par_coll.children.link(ent_coll)
-            else:
-                #link it to the scene
-                coll_scene.children.link(ent_coll)
-            # tag it with some custom properties.
-            ent_coll['depotPath']=after
-
-
-            enum_items = []
-            default_index = None
-
-            for idx, variant in enumerate(ent_applist):
-                enum_items.append((str(idx), variant, f"appearanceName {idx + 1}"))
-                if variant == app_name:  # Check if the variant matches the passed app_name
-                    default_index = str(idx)  # Set the default index if found
-
-            if default_index is None:
-                default_index = '0'
-
-            if len(enum_items)>0:
-                bpy.types.Collection.appearanceName = bpy.props.EnumProperty(
-                    name="Ent Appearances",
-                    items=enum_items,
-                    default=default_index,
-                )
-
-            comps=[]
-
+            app_comps[app_name]=[]
             # try to get components. only cases here.
             if len(ent_apps)==0 and ent_component_data:
                 chunks= ent_component_data
@@ -258,7 +263,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                 ent_app_idx=i
                                 app_name=a['appearanceName']['$value']
                                 continue
-                            
+
 
                 app_file = ent_apps[ent_app_idx]['appearanceResource']['DepotPath']['$value']
                 appfilepath=os.path.join(path,app_file).replace('\\',os.sep)+'.json'
@@ -279,48 +284,151 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                         chunks=None
                         if 'Data' in a_j['Data']['RootChunk']['appearances'][app_idx].keys():
                             if a_j['Data']['RootChunk']['appearances'][app_idx]['Data']['components']:
-                                comps= a_j['Data']['RootChunk']['appearances'][app_idx]['Data']['components']
+                                app_comps[app_name]= ent_components+a_j['Data']['RootChunk']['appearances'][app_idx]['Data']['components']
                             if 'compiledData' in a_j['Data']['RootChunk']['appearances'][app_idx]['Data'].keys():
                                 chunks= a_j['Data']['RootChunk']['appearances'][app_idx]['Data']['compiledData']['Data']['Chunks']
+                                ent_chunks[app_name]=chunks
                                 print('Chunks found')
 
 
-            if len(comps)==0:
+            if len(app_comps[app_name])==0:
                 print('falling back to rootchunk components...')
-                comps= ent_components
-            
-            for c in comps:
-                if 'name' in c.keys() and c['name']['$value']=='vehicle_slots' or c['name']['$value']=='slot':
-                    VS.append(c)
-                if 'rig' in c.keys():
-                    rig_path = os.path.join(path, c['rig']['DepotPath']['$value'])
-                    ent_rigs.append(rig_path)
-                    if rig_path in ent_rigs:
-                        print(f"Rig found in app components: {c['rig']['DepotPath']['$value']}")
-                        if rig is None:
-                            rig_j=JSONTool.jsonload(rig_path+'.json', error_messages)
-                            if rig_j is not None:
-                                rig_j=rig_j['Data']['RootChunk']
-                                print('rig json loaded')
-                            if c['animations']['gameplay']!=None and len(c['animations']['gameplay'])>0 :                                # get the armatures already in the model
-                                oldarms= [x for x in bpy.data.objects if 'Armature' in x.name]
-                                animpath=os.path.join(path,c['animations']['gameplay'][0]['animSet']['DepotPath']['$value']+'.glb')
-                                if os.path.exists(animpath):                                   
-                                    bpy.ops.io_scene_gltf.cp77(with_materials, filepath=animpath, scripting=True)
-                                    # find the armature we just loaded
-                                    arms=[x for x in bpy.data.objects if 'Armature' in x.name and x not in oldarms]
-                                    rig=arms[0]
-                                    bones=rig.pose.bones
-                                    rig["animset"] = animpath
-                                    rig["rig"] = rig_path
-                                    rig["ent"] = ent_name + ".ent.json"
-                                    print('anim rig loaded')
-                        else:
-                            print('another rig already loaded')
+                app_comps['BASE_COMPONENTS_ONLY']= ent_components
+            exclude_meshes=[]
+            for c in app_comps[app_name]:
+                if not ( 'mesh' in c.keys() or 'graphicsMesh' in c.keys()):
+                    continue
+                if 'mesh' in c.keys() or 'graphicsMesh' in c.keys():
+                   # print(c['mesh']['DepotPath']['$value'])
+                    meshname=''
+                    if 'mesh' in c.keys() and isinstance( c['mesh']['DepotPath']['$value'], str):
+                        m=c['mesh']['DepotPath']['$value']
+                        meshname=os.path.join(path, m).replace('\\', os.sep)
+                    elif 'graphicsMesh' in c.keys() and isinstance( c['graphicsMesh']['DepotPath']['$value'], str):
+                        m=c['graphicsMesh']['DepotPath']['$value']
+                        meshname=os.path.join(path, m).replace('\\', os.sep)
+                    if meshname and meshname not in exclude_meshes and os.path.exists(meshname[:-4]+'glb'):
+                        meshApp='default'
+                        if 'meshAppearance' in c.keys():
+                            meshApp=c['meshAppearance']
+                            #print(meshApp)
+                        if(meshname != 0):
+                            if meshname not in meshes:
+                                meshes[meshname] = {'appearances':[meshApp],'sector':'ALL'}
+                            else:
+                                meshes[meshname]['appearances'].append(meshApp)
+
+        meshes_w_apps={}
+
+        for m in meshes:
+            if len(m)>0:
+                    add_to_list(m , meshes, meshes_w_apps)
+
+        meshes_from_mesheswapps( meshes_w_apps, path, from_mesh_no=0, to_mesh_no=10000000, with_mats=with_materials, glbs=meshes, mesh_jsons=mesh_jsons,
+                                    Masters=Masters,generate_overrides=generate_overrides)
+
+
+        # loop through again to actually build the appearances
+        for x,app_name in enumerate(appearances):
+            print(f"\nImporting appearance {x+1} of {len(appearances)}: {app_name}")
+            app_start_time = time.time()
+            ent_coll = bpy.data.collections.new(ent_name+'_'+app_name)
+            if inColl and inColl in coll_scene.children.keys():
+                par_coll=bpy.data.collections.get(inColl)
+                par_coll.children.link(ent_coll)
+            else:
+                #link it to the scene
+                coll_scene.children.link(ent_coll)
+            # tag it with some custom properties.
+            ent_coll['depotPath']=after
+            if len(ent_apps)==0 and ent_component_data:
+                chunks= ent_component_data
+            elif len(ent_apps)>0:
+                ent_app_idx=-1
+                # Find the appearance in the entity app list
+                for i,a in enumerate(ent_apps):
+                    if a['appearanceName']['$value']==app_name:
+                        print('appearance matched, id = ',i)
+                        ent_app_idx=i
+                        continue
+
+                # apparently they sometimes just sack it off and use the name not the appearanceName after all. (single_doors.ent for instance)
+                if ent_app_idx<0:
+                    for i,a in enumerate(ent_apps):
+                        if a['name']['$value']==app_name:
+                            print('appearance matched, id = ',i)
+                            ent_app_idx=i
+                            app_name=a['appearanceName']['$value']
+                            continue
+
+                if ent_app_idx<0:
+                    if app_name != 'default':
+                        ent_app_idx=0
+                    else:
+                        for i,a in enumerate(ent_apps):
+                            if a['name']['$value']==ent_default:
+                                print('appearance matched, id = ',i)
+                                ent_app_idx=i
+                                app_name=a['appearanceName']['$value']
+                                continue
+            if not chunks:
+                chunks=ent_chunks[app_name]
+
+            enum_items = []
+            default_index = None
+
+            for idx, variant in enumerate(ent_applist):
+                enum_items.append((str(idx), variant, f"appearanceName {idx + 1}"))
+                if variant == app_name:  # Check if the variant matches the passed app_name
+                    default_index = str(idx)  # Set the default index if found
+
+            if default_index is None:
+                default_index = '0'
+
+            if len(enum_items)>0:
+                bpy.types.Collection.appearanceName = bpy.props.EnumProperty(
+                    name="Ent Appearances",
+                    items=enum_items,
+                    default=default_index,
+                )
+
+            comps=app_comps[app_name]
+
+            if not rig:
+                for c in comps:
+                    if 'name' in c.keys() and c['name']['$value']=='vehicle_slots' or c['name']['$value']=='slot':
+                        VS.append(c)
+                    if 'rig' in c.keys():
+                        rig_path = os.path.join(path, c['rig']['DepotPath']['$value'])
+                        ent_rigs.append(rig_path)
+                        if rig_path in ent_rigs:
+                            print(f"Rig found in app components: {c['rig']['DepotPath']['$value']}")
+                            if rig is None:
+                                rig_j=JSONTool.jsonload(rig_path+'.json', error_messages)
+                                if rig_j is not None:
+                                    rig_j=rig_j['Data']['RootChunk']
+                                    print('rig json loaded')
+                                if c['animations']['gameplay']!=None and len(c['animations']['gameplay'])>0 :                                # get the armatures already in the model
+                                    oldarms= [x for x in bpy.data.objects if 'Armature' in x.name]
+                                    animpath=os.path.join(path,c['animations']['gameplay'][0]['animSet']['DepotPath']['$value']+'.glb')
+                                    if os.path.exists(animpath):
+                                        bpy.ops.io_scene_gltf.cp77(with_materials, filepath=animpath, scripting=True)
+                                        # find the armature we just loaded
+                                        arms=[x for x in bpy.data.objects if 'Armature' in x.name and x not in oldarms]
+                                        rig=arms[0]
+                                        bones=rig.pose.bones
+                                        rig["animset"] = animpath
+                                        rig["rig"] = rig_path
+                                        rig["ent"] = ent_name + ".ent.json"
+                                        print('anim rig loaded')
+                            elif rig['rig']==rig_path:
+                                print('using existing rig')
+                            else:
+                                print('another rig',rig['rig'],' is already loaded ',rig_path)
             if not vehicle_slots:
                 if len(VS)>0:
                     vehicle_slots= VS[0]['slots']
-            
+
 
             for c in comps:
                 vs_rot=None
@@ -343,11 +451,12 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                             if 'HandleId' in chunk['animations'][0]['timeline']['items'][0]['impl'].keys():
                                 if int(chunk['animations'][0]['timeline']['items'][0]['impl']['HandleId'])==int(HRID):
                                     chunk_anim=chunk['animations'][0]['timeline']['items'][0]['impl']['Data']
-                    if chunk_anim['$type']=='gameTransformAnimation_RotateOnAxis':
+                    if isinstance(chunk_anim, dict) and chunk_anim['$type']=='gameTransformAnimation_RotateOnAxis':
                         rot_axis=chunk_anim['axis']
                         axis_no=0 # default to x
                         if rot_axis=='Z':
                             axis_no=2
+                            
                         elif rot_axis=='Y': #y & z are swapped
                             axis_no=1
 
@@ -359,14 +468,16 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                         o.keyframe_insert('rotation_euler', index=axis_no ,frame=duration*24)
                         if o.animation_data.action:
                             obj_action = bpy.data.actions.get(o.animation_data.action.name)
-                            obj_fcu = obj_action.fcurves[0]
+                            obj_slot = o.animation_data.action_slot
+                            channelbag = anim_utils.action_get_channelbag_for_slot(obj_action, obj_slot)
+                            obj_fcu = channelbag.fcurves[0]
                             modifier = obj_fcu.modifiers.new(type='CYCLES')
                             modifier.mode_before = 'REPEAT'
                             modifier.mode_after = 'REPEAT'
                             for pt in obj_fcu.keyframe_points:
                                 pt.interpolation = 'LINEAR'
                 elif 'mesh' in c.keys() or 'graphicsMesh' in c.keys():
-                   # print(c['mesh']['DepotPath']['$value'])
+                    #print(c['mesh']['DepotPath']['$value'])
                     meshname=''
                     if 'mesh' in c.keys() and isinstance( c['mesh']['DepotPath']['$value'], str):
                         m=c['mesh']['DepotPath']['$value']
@@ -377,6 +488,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                         meshname=os.path.basename(m)
                         meshpath=os.path.join(path, m[:-1*len(os.path.splitext(m)[1])]+'.glb').replace('\\', os.sep)
                     if meshname and meshname not in exclude_meshes and os.path.exists(meshpath):
+                        new=None
                         try:
                             meshApp='default'
                             if 'meshAppearance' in c.keys():
@@ -384,22 +496,34 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                 #print(meshApp)
                             try:
                                 # TODO: sim, this is broken, pls fix Y_Y
-                                bpy.ops.io_scene_gltf.cp77(with_materials, filepath=meshpath, appearances=meshApp,scripting=True,generate_overrides=generate_overrides)
-                                if (len(C.selected_objects) == 0):
-                                    show_message(f"Failed to import mesh: {meshpath}")
-                                for obj in C.selected_objects:
-                                    obj['componentName'] = c['name']['$value']
-                                    obj['sourcePath'] = meshpath
-                                    obj['meshAppearance'] = meshApp
-                                    if app_path:
-                                        obj['appResource'] = app_path[0]
-                                    obj['entAppearance'] = app_name
+                                # make this instance from masters rather than loading multiple times
+                                #bpy.ops.io_scene_gltf.cp77(with_materials, filepath=meshpath, appearances=meshApp,scripting=True,generate_overrides=generate_overrides)
+                                group, groupname = get_group(meshpath,meshApp,Masters)
+                                if (group):
+                                    new=bpy.data.collections.new(groupname)
+                                    ent_coll.children.link(new)
+                                    for old_obj in group.all_objects:
+                                        obj=old_obj.copy()
+                                        new.objects.link(obj)
+                                    for obj in new.objects:
+                                        obj['componentName'] = c['name']['$value']
+                                        obj['sourcePath'] = meshpath
+                                        obj['meshAppearance'] = meshApp
+                                        if app_path:
+                                            obj['appResource'] = app_path[0]
+                                        obj['entAppearance'] = app_name
+                                        if 'Armature' in obj.name:
+                                            obj.hide_set(True)
                             except:
                                 print('import threw an error:')
-                                print(traceback.print_exc())
+                                print(traceback.format_exc())
                                 continue
-                            objs = C.selected_objects
-                            if meshname=='v_sportbike2_arch_nemesis__ext01_axle_f_a_01':
+                            print('checking for collection - ', meshname)
+                            if new is None:
+                                print('collection not found after import - ', meshname)
+                                continue
+                            objs = new.objects
+                            if 'body_01' in meshname:
                                 print('those annoying front forks')
 
                             # NEW parentTransform stuff - fixes vehicles being exploded
@@ -425,6 +549,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
 
                                                     if chunk['parentTransform']['HandleId']==pT_HId:
                                                         chunk_pt=chunk['parentTransform']
+                                                        break
                                                         #print('HandleId found',chunk['parentTransform']['HandleId'])
 
                                 # if we found it then process it, most chars etc will just skip this
@@ -432,11 +557,11 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                     #print('in chunk pt processing bindName = ',chunk_pt['Data']['bindName'],' slotname= ',chunk_pt['Data']['slotName'])
                                     # parts have a bindname, and sometimes a slotname
                                     bindname=chunk_pt['Data']['bindName']['$value']
+                                    slotname=chunk_pt['Data']['slotName']['$value']
                                     # if it has a bindname of vehicle_slots, you may need to find the bone name in the vehicle slots in the root ent components
                                     # this should have been loaded earlier, check for it in the vehicle slots if not just set to the slot value
-                                    if bindname=='vehicle_slots' or 'slots':
+                                    if bindname=='vehicle_slots' or bindname=='slots':
                                         if vehicle_slots:
-                                            slotname=chunk_pt['Data']['slotName']['$value']
                                             for slot in vehicle_slots:
                                                 if slot['slotName']['$value']==slotname:
                                                     bindname=slot['boneName']['$value']
@@ -444,9 +569,9 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                             bindname= chunk_pt['Data']['slotName']['$value']
 
                                     # some meshes have boneRigMatrices in the mesh file which means we need jsons for the meshes or we cant access it. oh joy
-                                    elif bindname=="deformation_rig" and (not chunk_pt['Data']['slotName']['$value'] or len(chunk_pt['Data']['slotName']['$value'])==1):
+                                    elif bindname=="deformation_rig" and (not chunk_pt['Data']['slotName']['$value'] or len(chunk_pt['Data']['slotName']['$value'])==1 or chunk_pt['Data']['slotName']['$value']=='None'):
                                         json_name=os.path.join(path, c['mesh']['DepotPath']['$value']+'.json')
-                                        #print("in the deformation rig bit",json_name)
+                                        #print:("in the deformation rig bit",json_name)
                                         if json_name in mesh_jsons:
                                             mesh_j = JSONTool.jsonload(json_name, error_messages)
                                             mesh_j=mesh_j['Data']['RootChunk']
@@ -468,20 +593,22 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                                 # print(mx)
                                                 bones=rig.pose.bones
                                                 #there are occasionally more than 1 bone in here, not worked out what/how maps to those
-                                                bone=bones[mesh_j['boneNames'][0]]
-                                                # the transform matrix above is in the orientation of the bone that its linked to, so I'm doing a bodged job of correcting for that here.
-                                                bone_mat_rot=bone.matrix.to_euler()
-                                                #print(bone_mat_rot)
+                                                bn=mesh_j['boneNames'][0]['$value']
                                                 xdisp=0
                                                 ydisp=0
                                                 zdisp=0
 
-                                                if abs(bone_mat_rot.y)>0.001:
-                                                    xdisp = -matrix[1][3]/sin(bone_mat_rot.y)
-                                                if abs(bone_mat_rot.x)>0.001:
-                                                    ydisp = -matrix[1][3]/sin(bone_mat_rot.x)
-                                                if abs(bone_mat_rot.z)>0.001:
-                                                    zdisp = matrix[2][3]/sin(bone_mat_rot.z)
+                                                if bn in bones.keys():
+                                                    bone=bones[mesh_j['boneNames'][0]['$value']]
+                                                    # the transform matrix above is in the orientation of the bone that its linked to, so I'm doing a bodged job of correcting for that here.
+                                                    bone_mat_rot=bone.matrix.to_euler()
+                                                    #print(bone_mat_rot)
+                                                    if abs(bone_mat_rot.y)>0.001:
+                                                        xdisp = -matrix[1][3]/sin(bone_mat_rot.y)
+                                                    if abs(bone_mat_rot.x)>0.001:
+                                                        ydisp = -matrix[1][3]/sin(bone_mat_rot.x)
+                                                    if abs(bone_mat_rot.z)>0.001:
+                                                        zdisp = matrix[2][3]/sin(bone_mat_rot.z)
                                                 #print(xdisp, ydisp ,zdisp)
                                                 # now we have the displacements. move things
                                                 for obj in objs:
@@ -497,7 +624,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                                     bpy.context.view_layer.objects.active = obj
                                                     bpy.ops.constraint.childof_set_inverse(constraint="Child Of", owner='OBJECT')
 
-                                    
+
                                     # things like the tvs have a bindname but no slotname, bindname appears to point at the name of the main component, and its the only one with a transform applied
                                     elif bindname:
                                         #see if we can find a component that matches it
@@ -505,9 +632,9 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                             print('interior_02')
                                         bindpt=[cmp for cmp in comps if cmp['name']['$value']==bindname]
                                         slotname= chunk_pt.get('Data').get('slotName').get('$value')
-                                        if bindpt and slotname:
+                                        #if bindpt and slotname:
                                             # Have a bindpoint and a slotname, so we can use the local transform from the bindpoint
-                                            print('bindpt and slotname found')
+                                            #print('bindpt and slotname found')
 
                                         if bindpt and len(bindpt)==1:
                                             if c['localTransform']['Position']['x']['Bits']==0 and c['localTransform']['Position']['y']['Bits']==0 and c['localTransform']['Position']['z']['Bits']==0 and 'localTransform' in bindpt[0]:
@@ -526,7 +653,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                             # if bindname isnt in the bones then its a part thats already bound to a bone,
                                             # These inherit the parent and local transforms from the other part, find it and work out what the transform is
                                             for o in comps:
-                                                if o['name']['$value']==bindname:
+                                                if o['name']['$value']==bindname and 'parentTransform' in o.keys():
                                                     pT=o['parentTransform']
                                                     if pT:
 
@@ -554,7 +681,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                                                             bindname=slot['boneName']['$value']
 
                                         ######
-                                        if bindname in bones.keys():
+                                        if bindname in bones.keys() and rig_j is not None and rig_j['boneNames'] is not None:
                                             #print('bindname in bones')
                                             bidx=0
                                             for bid, b in enumerate(rig_j['boneNames']):
@@ -589,27 +716,33 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                                 vs_z_ang=vs_mat.to_euler().z
                                                 pt_z_ang=pt_mat.to_euler().z
 
-                                                obj.location.x =  obj.location.x+pt_trans[0]+vs_pos[0]
-                                                obj.location.y = obj.location.y+pt_trans[1]+vs_pos[1]
-                                                obj.location.z =  obj.location.z+pt_trans[2]+vs_pos[2]
+                                                if obj.location != pt_trans:
+                                                    obj.location.x +=  pt_trans[0]+vs_pos[0]
+                                                    obj.location.y += pt_trans[1]+vs_pos[1]
+                                                    obj.location.z +=  pt_trans[2]+vs_pos[2]
+                                                else:    
+                                                    obj.location.x =   pt_trans[0]+vs_pos[0]
+                                                    obj.location.y = pt_trans[1]+vs_pos[1]
+                                                    obj.location.z =  pt_trans[2]+vs_pos[2]
 
                                                 obj.rotation_quaternion.x = btrans['Rotation']['i']
                                                 obj.rotation_quaternion.y = btrans['Rotation']['j']
                                                 obj.rotation_quaternion.z = btrans['Rotation']['k']
                                                 obj.rotation_quaternion.w = btrans['Rotation']['r']
-                                                
-                                                
+
+
                                                 obj.rotation_quaternion=obj.rotation_quaternion*Quaternion(vs_rot)
                                                 #obj.matrix_local=  obj.matrix_local @ vs_mat
                                                 #obj.matrix_world= pt_mat @ obj.matrix_world
-
+                                                
                                                 #Apply child of constraints to them and set the inverse
                                                 if 'fuel_cap' not in bindname:
-                                                    co=obj.constraints.new(type='CHILD_OF')
-                                                    co.target=rig
-                                                    co.subtarget= bindname
-                                                    bpy.context.view_layer.objects.active = obj
-                                                    bpy.ops.constraint.childof_set_inverse(constraint=loc("Child Of"), owner='OBJECT')
+                                                    if 'Child Of' not in obj.constraints.keys():                                                        
+                                                        co=obj.constraints.new(type='CHILD_OF')
+                                                        co.target=rig
+                                                        co.subtarget= bindname
+                                                        bpy.context.view_layer.objects.active = obj
+                                                        bpy.ops.constraint.childof_set_inverse(constraint=loc("Child Of"), owner='OBJECT')
                                                 else:
                                                     # Apply location constraint to the fuel cap
                                                     co=obj.constraints.new(type='COPY_LOCATION')
@@ -657,7 +790,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                 y=x_orig*sin(z_ang)+y_orig*cos(z_ang)
                                 #print ('Local transform  x= ',x,'y= ',y,' z= ',z)
 
-                            for obj in objs:
+                            for obj in new.objects:
                                 #print(obj.name, obj.type)
                                 obj.location.x =  obj.location.x+x
                                 obj.location.y = obj.location.y+y
@@ -671,7 +804,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                     obj.rotation_quaternion.z = c['localTransform']['Orientation']['k']
                                     obj.rotation_quaternion.w = c['localTransform']['Orientation']['r']
                                 #if vs_rot:
-                                #    obj.matrix_local =  Matrix.LocRotScale(Vector(0,0,0),Quaternion(vs_rot),Vector(1,1,1)) @ 
+                                #    obj.matrix_local =  Matrix.LocRotScale(Vector(0,0,0),Quaternion(vs_rot),Vector(1,1,1)) @
                                 if 'scale' in c['localTransform'].keys():
                                     obj.scale.x = c['localTransform']['scale']['X']
                                     obj.scale.y = c['localTransform']['scale']['Y']
@@ -682,14 +815,15 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                     obj.scale.z = c['visualScale']['Z']
 
                             if (len(objs) > 0):
-                                move_coll= coll_scene.children.get( objs[0].users_collection[0].name )
+                                move_coll=new
                                 move_coll['depotPath']=c['mesh']['DepotPath']['$value']
                                 move_coll['meshAppearance']=meshApp
-                                move_coll['meshpath']="its an entity"
+                                if 'meshpath' not in move_coll:
+                                    move_coll['meshpath']="its an entity"
                                 if bindname:
                                     move_coll['bindname']=bindname
-                                ent_coll.children.link(move_coll)
-                                coll_scene.children.unlink(move_coll)
+                                if move_coll.name in coll_scene.children:
+                                    coll_scene.children.unlink(move_coll)
 
                             # New chunkMask reading
                             # convert the value to a list of bools, then apply those statuses to the submeshes.
@@ -721,52 +855,71 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                                     bit = cm_list[subnum] if subnum < len(cm_list) else True
                                     obj.hide_set(not bit)
                                     obj.hide_render = not bit
+
                         except:
                             print("Failed on ",meshname)
-                            print(traceback.print_exc())
+                            print(traceback.format_exc())
 
             for c in ent_component_data:
                 if (c['$type']=='entLightChannelComponent'):
                     print('Light channel found')
-                    if 'shape' in c.keys() and 'Data' in c['shape'].keys() and 'vertices' in c['shape']['Data'].keys():
-                        vertices=c['shape']['Data']['vertices']
-                        if len(vertices)>0 and 'indices' in c['shape']['Data'].keys():
-                            indices=c['shape']['Data']['indices']
-                            if len(indices)>0:
-                                mesh_data = bpy.data.meshes.new(c['name']['$value'])
-                                mesh_obj = bpy.data.objects.new(mesh_data.name, mesh_data)
-                                mesh_obj.display_type = 'WIRE'
-                                mesh_obj.color = (0.005, 0.79105, 1, 1)
-                                mesh_obj.show_wire = True
-                                mesh_obj.show_in_front = True
-                                mesh_obj.display.show_shadows = False
-                                mesh_obj.rotation_mode = 'QUATERNION'
-                                verts=[]
-                                for v in vertices:
-                                    verts.append((v['X'],v['Y'],v['Z']))
-                                edges=[]
-                                Faces=[indices[i:i+3] for i in range(0, len(indices), 3)]
-                                mesh_data.from_pydata(verts, edges, Faces)
-                                mesh_obj['ntype'] = 'entLightChannelComponent'
-                                mesh_obj['name'] = c['name']['$value']
-                                mesh_obj['entJSON'] = filepath
+                    mesh_obj=None
+                    lcgroup=None
+                    lcgroupname=c['name']['$value']
+                    if not lcgroupname in bpy.data.collections.get("MasterInstances").children.keys():
+                        if 'shape' in c.keys() and 'Data' in c['shape'].keys() and 'vertices' in c['shape']['Data'].keys():
+                            vertices=c['shape']['Data']['vertices']
+                            if len(vertices)>0 and 'indices' in c['shape']['Data'].keys():
+                                indices=c['shape']['Data']['indices']
+                                if len(indices)>0:
+                                    lcgroup=bpy.data.collections.new(lcgroupname)
+                                    mesh_data = bpy.data.meshes.new(lcgroupname)
+                                    mesh_obj = bpy.data.objects.new(mesh_data.name, mesh_data)
+                                    mesh_obj.display_type = 'WIRE'
+                                    mesh_obj.color = (0.005, 0.79105, 1, 1)
+                                    mesh_obj.show_wire = True
+                                    mesh_obj.show_in_front = True
+                                    mesh_obj.display.show_shadows = False
+                                    mesh_obj.rotation_mode = 'QUATERNION'
+                                    verts=[]
+                                    for v in vertices:
+                                        verts.append((v['X'],v['Y'],v['Z']))
+                                    edges=[]
+                                    Faces=[indices[i:i+3] for i in range(0, len(indices), 3)]
+                                    mesh_data.from_pydata(verts, edges, Faces)
+                                    mesh_obj['ntype'] = 'entLightChannelComponent'
+                                    mesh_obj['name'] = c['name']['$value']
+                                    mesh_obj['entJSON'] = filepath
 
-                                bindname=c['parentTransform']['Data']['bindName']['$value']
-                                if bindname=='vehicle_slots':
-                                    if vehicle_slots:
-                                        slotname=c['parentTransform']['Data']['slotName']['$value']
-                                        for slot in vehicle_slots:
-                                            if slot['slotName']['$value']==slotname:
-                                                bindname=slot['boneName']['$value']
-
-                                ent_coll.objects.link(mesh_obj)
-                                if bindname and rig:
-                                    co=mesh_obj.constraints.new(type='COPY_LOCATION')
-                                    co.target=rig
-                                    co.subtarget= bindname
+                                    bindname=c['parentTransform']['Data']['bindName']['$value']
+                                    if bindname=='vehicle_slots':
+                                        if vehicle_slots:
+                                            slotname=c['parentTransform']['Data']['slotName']['$value']
+                                            if slotname=='None':
+                                                slotname='Base'
+                                            for slot in vehicle_slots:
+                                                if slot['slotName']['$value']==slotname:
+                                                    bindname=slot['boneName']['$value']
+                                                    mesh_obj['bindname']=bindname
+                                    lcgroup.objects.link(mesh_obj)
+                                    Masters.children.link(lcgroup)
+                    if lcgroupname in bpy.data.collections.get("MasterInstances").children.keys():
+                        Mastlcgroup=bpy.data.collections.get(lcgroupname)
+                        if (Mastlcgroup):
+                            lcgroup=bpy.data.collections.new(lcgroupname)
+                            ent_coll.children.link(lcgroup)
+                            for old_obj in Mastlcgroup.all_objects:
+                                obj=old_obj.copy()
+                                lcgroup.objects.link(obj)
+                            mesh_obj=lcgroup.all_objects[0]
+                            bindname=mesh_obj.get('bindname','')
+                        if bindname and rig and lcgroup and mesh_obj:
+                            co=mesh_obj.constraints.new(type='COPY_LOCATION')
+                            co.target=rig
+                            co.subtarget= bindname
             print('Appearance import time:', time.time() - app_start_time, 'Seconds')
 
-        
+
         # am checking for license plates as we go rather than parsing all the components again.
         if includes_license_plates:
             license_plates = [obj for obj in bpy.data.objects if 'license_plate' in obj.get('componentName', '')]
@@ -828,103 +981,34 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
                     return('FINISHED')
                 else:
                     for index, i in enumerate(ent_component_data):
-                    #for comp in ent_component_data:
-                        if i['$type'] == 'entColliderComponent':
-                            new_col = bpy.data.collections.new('entColliderComponent')
-                            collision_collection.children.link(new_col)
+                        if i['$type'] in ('entColliderComponent', 'entSimpleColliderComponent'):
                             collision_type = 'ENTITY'
+                            col_name = i['$type']
+                            
+                            # Find or create a sub-collection for these collider types
+                            new_col = None
+                            for child in collision_collection.children:
+                                if child.name == col_name:
+                                    new_col = child
+                                    break
+                            
+                            if not new_col:
+                                new_col = bpy.data.collections.new(col_name)
+                                collision_collection.children.link(new_col)
+                                
                             cdata = i['colliders'][0]['Data']
                             collision_shape = cdata['$type']
-                            transform = cdata['localToBody']
-                            simulationType = i['simulationType']
                             submeshName = '_' + collision_shape
-                            physmat = cdata['material']['$value']
-                            position = transform['position']['X'], transform['position']['Y'], transform['position']['Z']
-                            rotation = transform['orientation']['r'], transform['orientation']['j'], transform['orientation']['k'], transform['orientation']['i']
-                            #print('cdata:', cdata)
-                            print('collider info:', collision_shape, submeshName, physmat, position, rotation)
-                            if collision_shape == 'physicsColliderBox':
-                                try:
-                                    half_extents = cdata['halfExtents']
-                                    draw_box_collider(submeshName, new_col, half_extents, transform,  physmat, collision_type)
-                                    obj = bpy.context.object
-                                    box = obj
-                                    #set_collider_props(box, collision_shape, physmat, collision_type)
-                                    box['simulationType'] = simulationType
-                                except Exception as e:
-                                    print('uh oh', e)
-                            if collision_shape == 'physicsColliderConvex':
-                                try:
-                                    vertices = cdata['vertices']
-                                    obj = draw_convex_collider(submeshName, new_col, vertices, transform, physmat, collision_type)
-                                    convcol = obj
-                                    #set_collider_props(convcol, collision_shape, physmat, collision_type)
-                                    convcol['simulationType'] = simulationType
-                                except Exception as e:
-                                    print('uh oh', e)
-                            if collision_shape == 'physicsColliderSphere':
-                                try:
-                                    r = cdata['radius']
-                                    submeshName = '_' + collision_shape
-                                    obj = draw_sphere_collider(submeshName, new_col, r, position, physmat, collision_type)
-                                except Exception as e:
-                                    print('uh oh', e)
-                            if collision_shape == 'physicsColliderCapsule':
-                                try:
-                                    r = cdata['radius']
-                                    h = cdata['height']
-                                    submeshName = '_' + collision_shape
-                                    obj = draw_capsule_collider(submeshName, new_col, r, h, position, rotation, physmat, collision_type)
-                                except Exception as e:
-                                    print('uh oh', e)
-                        if i['$type'] == 'entSimpleColliderComponent':
-                            collision_type = 'ENTITY'
-                            new_col = bpy.data.collections.new('entSimpleColliderComponent')
-                            collision_collection.children.link(new_col)
-                            cdata = i['colliders'][0]['Data']
-                            collision_shape = cdata['$type']
-                            transform = cdata['localToBody']
-                            #simulationType = i['simulationType']
-                            submeshName = '_' + collision_shape
-                            physmat = cdata['material']['$value']
-                            position = transform['position']['X'], transform['position']['Y'], transform['position']['Z']
-                            rotation = transform['orientation']['r'], transform['orientation']['j'], transform['orientation']['k'], transform['orientation']['i']
-                            #print('position:', position[0], position[1], position[2], 'rotation', rotation[0], rotation[1], rotation[2], rotation[3])
-                           # print('collider info:', collision_shape, submeshName, physmat, position, rotation)
-                            if collision_shape == 'physicsColliderBox':
-                                try:
-                                    half_extents = cdata['halfExtents']
-                                    draw_box_collider(submeshName, new_col, half_extents, transform,  physmat, collision_type)
-                                    obj = bpy.context.object
-                                    box = obj
-                                    #set_collider_props(box, collision_shape, physmat, collision_type)
-                                   # box['simulationType'] = simulationType
-                                except Exception as e:
-                                    print('uh oh', e)
-                            if collision_shape == 'physicsColliderConvex':
-                                try:
-                                    vertices = cdata['vertices']
-                                    obj = draw_convex_collider(submeshName, new_col, vertices, transform, physmat, collision_type)
-                                    convcol = obj
-                                    #set_collider_props(convcol, collision_shape, physmat, collision_type)
-                                   # convcol['simulationType'] = simulationType
-                                except Exception as e:
-                                    print('uh oh', e)
-                            if collision_shape == 'physicsColliderSphere':
-                                try:
-                                    r = cdata['radius']
-                                    submeshName = '_' + collision_shape
-                                    obj = draw_sphere_collider(submeshName, new_col, r, position, physmat, collision_type)
-                                except Exception as e:
-                                    print('uh oh', e)
-                            if collision_shape == 'physicsColliderCapsule':
-                                try:
-                                    r = cdata['radius']
-                                    h = cdata['height']
-                                    submeshName = '_' + collision_shape
-                                    obj = draw_capsule_collider(submeshName, new_col, r, h, position, rotation, physmat, collision_type)
-                                except Exception as e:
-                                    print('uh oh', e)
+                            
+                            # Pass to pxbridge to create a native PhysX actor instead of a mesh representation
+                            try:
+                                obj = import_collider_as_actor(cdata, submeshName, new_col)
+                                if obj:
+                                    # Add extra properties for reference
+                                    if 'simulationType' in i:
+                                        obj['simulationType'] = i['simulationType']
+                            except Exception as e:
+                                print(f'Error importing {collision_shape} via pxbridge: {e}')
     if rig:
         arm=bpy.data.armatures[rig.name]
         arm.pose_position = 'REST'
@@ -932,6 +1016,7 @@ def importEnt(with_materials, filepath='', appearances=[], exclude_meshes=[], in
         JSONTool.stop_caching()
     if len(error_messages) > 0:
         show_message('Errors during import:\n\t' + '\n\t'.join(error_messages))
+    Masters.hide_viewport=True
     if not cp77_addon_prefs.non_verbose:
         print(f"Imported Entity in {time.time() - start_time} Seconds from {ent_name}.ent")
         print('-------------------- Finished Importing Cyberpunk 2077 Entity --------------------\n')

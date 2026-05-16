@@ -1,27 +1,28 @@
 import sys
-import re
 import bpy
-import bpy.utils.previews
-from bpy.types import (Operator, OperatorFileListElement, PropertyGroup, Panel)
-from bpy.props import (StringProperty, BoolProperty, IntProperty, CollectionProperty)
-from typing import Optional
-from ..main.bartmoss_functions import *
-from ..cyber_props import cp77riglist
+from bpy.utils import register_class, unregister_class
+from bpy.types import Panel
+from bpy.props import StringProperty
+from ..cyber_props import CP77_FacialProps
 from ..icons.cp77_icons import get_icon
 from ..main.common import get_classes
-from ..importers.import_with_materials import CP77GLBimport
-from .animtools import *
-from .generate_rigs import cp77_to_rigify
-from .facial import load_wkit_facialsetup, load_wkit_rig_skeleton
-from .tracksolvers import solve_tracks_face, build_tracks_from_armature
-
-def CP77AnimsList(self, context):
-    for action in bpy.data.actions:
-        if action.library:
-            continue
-        yield action
-_state = {"rig": None, "setup": None}
-### Draw a panel to store anims functions
+from . import root_motion
+from . import anim_events
+from . import anim_ops
+from . import facial_ops
+from . import rig_binding
+from . import pose_preview
+from . import solver as _solver_mod
+from .anim_ops import BHLS_OT_Start, BHLS_OT_Stop
+from .facial_ops import (
+    _CACHE,
+    _PREVIEW_SNAPSHOT,
+    _get_pose_count,
+    _get_pose_track_name,
+    PARSELMOUTH_AVAILABLE,
+    G2P_AVAILABLE,
+)
+from .animtools import CP77AnimsList
 class CP77_PT_AnimsPanel(Panel):
     bl_idname = "CP77_PT_animspanel"
     bl_label = "Animation Tools"
@@ -40,675 +41,474 @@ class CP77_PT_AnimsPanel(Panel):
         else:
             return context
 
-## make sure the context is unrestricted as possible, ensure there's an armature selected
     def draw(self, context):
         layout = self.layout
-
         cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
 
         if not cp77_addon_prefs.show_animtools:
             return
+
         props = context.scene.cp77_panel_props
-        box = layout.box()
-        box.label(text='Rigs', icon_value=get_icon("WKIT"))
-        row = box.row(align=True)
-        row.operator('cp77.rig_loader', text="Load Bundled Rig")
         obj = context.active_object
 
+        # Tab selector at the top
+        row = layout.row(align=True)
+        row.prop(props, "animtab", expand=True)
+
+        layout.separator()
+
+        # RIG SETUP TAB
+        if props.animtab == 'RIGSETUP':
+            self.draw_rigsetup_tab(context, layout, obj)
+
+        # ANIMATION TAB
+        elif props.animtab == 'ANIMATION':
+            self.draw_animation_tab(context, layout, obj)
+
+        # FACIAL ANIMATION TAB
+        elif props.animtab == 'FACIAL':
+            self.draw_facial_tab(context, layout, obj)
+
+    def draw_rigsetup_tab(self, context, layout, obj):
+        """Rig loading, configuration, and preparation"""
+        box = layout.box()
+        box.label(text='Rig Loading', icon_value=get_icon("WKIT"))
+        col = box.column()
+        col.operator('cp77.rig_loader', text="Load Bundled Rig")
+
         if obj is None or obj.type != 'ARMATURE':
+            col.label(text="Select an armature to access additional rig tools", icon='INFO')
             return
 
-        col = box.column()
         col.operator('rigify_generator.cp77', text='Generate Rigify Rig')
+
+        # Bone visibility
+        box = layout.box()
+        box.label(text="Bone Visibility", icon='BONE_DATA')
+        col = box.column()
         if 'deformBonesHidden' in obj:
-            col.operator('bone_unhider.cp77',text='Unhide Deform Bones')
+            col.operator('bone_unhider.cp77', text='Unhide Deform Bones')
         else:
-            col.operator('bone_hider.cp77',text='Hide Deform Bones')
-        col.operator('reset_armature.cp77')
-        col.operator('delete_unused_bones.cp77', text='Delete unused bones')
+            col.operator('bone_hider.cp77', text='Hide Deform Bones')
+
+        if anim_ops._running:
+            col.operator(BHLS_OT_Stop.bl_idname, text="Stop Drawing Bone Lines", icon='PAUSE')
+        else:
+            col.operator(BHLS_OT_Start.bl_idname, text="Draw Bone Lines", icon='PLAY')
+
+        # Posing
+        box = layout.box()
+        box.label(text="Pose Management", icon='ARMATURE_DATA')
+        col = box.column()
+        col.operator('reset_armature.cp77', text="Reset Armature")
+
         if 'T-Pose' in obj.data:
             if obj.data['T-Pose'] is True:
-                col.operator('cp77.load_apose')
+                col.operator('cp77.load_apose', text="Switch to A-Pose")
             else:
-                col.operator('cp77.load_tpose')
-        col.operator('cp77.anim_namer')
-        available_anims = list(CP77AnimsList(context,obj))
-        active_action = obj.animation_data.action if obj.animation_data else None
-        if not available_anims:
+                col.operator('cp77.load_tpose', text="Switch to T-Pose")
+
+
+
+    def draw_animation_tab(self, context, layout, obj):
+        """Animation playback, management, and keyframing"""
+        if obj is None or obj.type != 'ARMATURE':
             box = layout.box()
-            row = box.row(align=True)
-            row.label(text='Animsets', icon_value=get_icon("WKIT"))
-            row.operator('cp77.new_action',icon='ADD', text="")
-            row = box.row(align=True)
-            row.menu('RENDER_MT_framerate_presets')
-            row = box.row(align=True)
-            row.prop(context.scene.render, "fps")
-            row.prop(context.scene.render, "fps_base")
-            row = box.row(align=True)
-            row.operator('insert_keyframe.cp77')
+            box.label(text="Select an armature to use animation tools", icon='INFO')
             return
 
+        available_anims = list(CP77AnimsList(self, context))
+        active_action = obj.animation_data.action if obj.animation_data else None
+        props = context.scene.cp77_panel_props
 
+        # Playback controls with timeline settings
         box = layout.box()
-        for action in available_anims:
-            action.use_fake_user:True
-            selected = action == active_action
-            if selected:
-                row = box.row(align=True)
-                row.alignment='CENTER'
-                row.operator("screen.frame_jump", text="", icon='REW').end = False
-                row.operator("screen.keyframe_jump", text="", icon='PREV_KEYFRAME').next = False
-                row.operator("screen.animation_play", text="", icon='PLAY_REVERSE').reverse = True
-                row.operator("screen.animation_play", text="", icon='PLAY')
-                row.operator("screen.keyframe_jump", text="", icon='NEXT_KEYFRAME').next = True
-                row.operator("screen.frame_jump", text="", icon='FF').end = True
-                row = box.row(align=True)
-                row.prop(active_action, 'use_frame_range', text="Set Playback Range",toggle=1)
-                if active_action.use_frame_range:
-                    row = box.row(align=True)
-                    row.prop(bpy.context.scene, 'frame_start', text="")
-                    row.prop(bpy.context.scene, 'frame_end', text="")
-
-        box = layout.box()
-        row = box.row(align=True)
-        row.label(text='Animsets', icon_value=get_icon('WKIT'))
-        row.operator('cp77.new_action',icon='ADD', text="")
-        row = box.row(align=True)
-        row.menu('RENDER_MT_framerate_presets')
-        row = box.row(align=True)
-        row.prop(context.scene.render, "fps")
-        row.prop(context.scene.render, "fps_base")
-        row = box.row(align=True)
-        row.operator('insert_keyframe.cp77')
-        # if available_anims:
         col = box.column(align=True)
-        for action in available_anims:
-            action.use_fake_user:True
-            selected = action == active_action
+
+        if active_action:
             row = col.row(align=True)
-            sub = row.column(align=True)
-            sub.ui_units_x = 1.0
+            row.alignment = 'CENTER'
+            row.operator("screen.frame_jump", text="", icon='REW').end = False
+            row.operator("screen.keyframe_jump", text="", icon='PREV_KEYFRAME').next = False
+            row.operator("screen.animation_play", text="", icon='PLAY_REVERSE').reverse = True
+            row.operator("screen.animation_play", text="", icon='PLAY')
+            row.operator("screen.keyframe_jump", text="", icon='NEXT_KEYFRAME').next = True
+            row.operator("screen.frame_jump", text="", icon='FF').end = True
+
+            row = col.row(align=True)
+            row.prop(active_action, 'use_frame_range', text="Set Playback Range", toggle=1)
+
+            if active_action.use_frame_range:
+                row = col.row(align=True)
+                row.prop(bpy.context.scene, 'frame_start', text="Start")
+                row.prop(bpy.context.scene, 'frame_end', text="End")
+
+        col.menu('RENDER_MT_framerate_presets')
+        row = col.row(align=True)
+        row.prop(context.scene.render, "fps", text="FPS")
+        row.prop(context.scene.render, "fps_base", text="Base")
+        col.separator()
+        # Animation list
+        header, panel = layout.panel("animsets", default_closed=False)
+        header.label(text='Animsets', icon_value=get_icon('WKIT'))
+        header.operator('cp77.new_action', icon='ADD', text="")
+
+        if panel:
+            if available_anims and obj.animation_data:
+                row = panel.row()
+                rows = 5 if len(bpy.data.actions) > 5 else len(bpy.data.actions)
+                row.template_list(
+                        "CP77_UL_AnimList",
+                        "",
+                        bpy.data,
+                        "actions",
+                        props,
+                        "active_action_index",
+                        rows=rows
+                        )
+
+        # Root Motion tools
+        rm_open, panel = layout.panel("root_motion", default_closed=True)
+        rm_open.label(text="Root Motion", icon='ANIM')
+
+        if panel:
+            data = context.scene.rm_data
+            col = panel.column(align=True)
+            col.label(text="Bone Configuration:", icon='BONE_DATA')
+            col.prop_search(data, "root", obj.pose, "bones", text="Root")
+            col.prop_search(data, "hip", obj.pose, "bones", text="Hip")
+
+            col.separator()
+            col.label(text="Transfer Options:", icon='MODIFIER')
+            col.prop(data, "step")
+            col.prop(data, "no_rot")
+            col.prop(data, "do_vert")
+
+            col.separator()
+            col.label(text="Operations:")
+            col.operator("cp77.hip_to_root_motion", text="Hip to Root Motion", icon='EXPORT')
+            col.operator("cp77.root_to_hip_motion", text="Root to Hip Motion", icon='IMPORT')
+            col.operator("cp77.remove_root_motion", text="Remove Root Motion", icon='X')
+
+        # Keyframe and animation tools
+        box = layout.box()
+        box.label(text="Animation Tools", icon='KEYFRAME')
+        col = box.column(align=True)
+        col.operator('insert_keyframe.cp77', text="Insert Keyframe")
+        col.operator('cp77.anim_namer', text="Fix Anim Names")
+
+    def draw_facial_tab(self, context, layout, obj):
+        """Facial animation: setup files, weighted pose preview, baking, JALI."""
+        props  = context.scene.cp77_facial
+        loaded = _CACHE.get("rig") is not None
+
+        #Facial Setup Files
+        header, panel = layout.panel("facial_setup_files", default_closed=False)
+        header.label(text="Facial Setup Files", icon='FILE_FOLDER')
+        if loaded:
+            header.label(text="", icon='CHECKMARK')
+
+        if panel:
+            col = panel.column(align=True)
+            col.prop(props, "rig_json",    text="Rig JSON")
+            col.prop(props, "facial_json", text="Facial JSON")
+            col.operator("cp77.load_facial", text="Load Facial Setup", icon='FILE_FOLDER')
+
+            if loaded:
+                rig   = _CACHE["rig"]
+                setup = _CACHE["setup"]
+                n_main = _get_pose_count(setup, "face")
+                n_corr = setup.face.num_correctives
+                info   = panel.column(align=True)
+                info.scale_y = 0.85
+                info.separator(factor=0.5)
+                info.label(text=f"Bones: {rig.num_bones}  ·  Tracks: {len(rig.track_names)}", icon='ARMATURE_DATA')
+                info.label(text=f"Main poses: {n_main}  ·  Correctives: {n_corr}",            icon='ANIM_DATA')
+
+        #Pose Preview
+        preview_on = getattr(props, 'preview_active', False)
+        header, panel = layout.panel("facial_pose_preview", default_closed=False)
+        header.label(text="Pose Preview", icon='HIDE_OFF' if preview_on else 'HIDE_ON')
+
+        if panel:
+            if not loaded:
+                panel.label(text="Load a facial setup to enable preview.", icon='INFO')
+            else:
+                rig   = _CACHE["rig"]
+                setup = _CACHE["setup"]
+
+                # Part selector
+                row = panel.row(align=True)
+                part_row = row.split(factor=0.15, align=True)
+                part_row.label(text="Part:")
+                if hasattr(props, 'preview_part'):
+                    sub = part_row.row(align=True)
+                    sub.prop(props, "preview_part", expand=True)
+                part = getattr(props, 'preview_part', 'face')
+
+                # Pose index + count
+                n_poses    = _get_pose_count(setup, part)
+                pose_index = int(getattr(props, 'preview_pose_index',
+                                         getattr(props, 'main_pose', 0)))
+                pose_index = max(0, min(pose_index, max(0, n_poses - 1)))
+
+                idx_row = panel.row(align=True)
+                if hasattr(props, 'preview_pose_index'):
+                    idx_row.prop(props, "preview_pose_index", text="Pose")
+                else:
+                    idx_row.prop(props, "main_pose", text="Pose")
+                idx_row.label(text=f"/ {max(0, n_poses - 1)}")
+
+                # Live track name
+                track_name = _get_pose_track_name(setup, rig, part, pose_index)
+                if track_name:
+                    nr = panel.row()
+                    nr.scale_y = 0.8
+                    nr.label(text=f"Track:  {track_name}", icon='ACTION')
+
+                # Weight slider
+                panel.prop(props, "preview_weight", text="Weight", slider=True)
+
+                panel.separator(factor=0.3)
+
+                # ◀ Prev  Apply  Next ▶
+                nav = panel.row(align=True)
+                nav.scale_y = 1.15
+                op_p = nav.operator("cp77.browse_pose", text="", icon='TRIA_LEFT')
+                op_p.direction = -1
+                nav.operator("cp77.apply_main_pose", text="Apply Pose", icon='PLAY')
+                op_n = nav.operator("cp77.browse_pose", text="", icon='TRIA_RIGHT')
+                op_n.direction = 1
+
+                # Clear / restore
+                clear = panel.row()
+                clear.enabled = preview_on or (obj is not None and obj.name in _PREVIEW_SNAPSHOT)
+                clear.operator("cp77.clear_pose_preview", text="Clear Preview", icon='LOOP_BACK')
+
+                panel.separator(factor=0.3)
+
+                # Reset row
+                reset_row = panel.row(align=True)
+                reset_row.operator("cp77.reset_neutral",         text="Rest Pose",       icon='ARMATURE_DATA')
+                reset_row.operator("cp77.reset_tracks_defaults", text="Reset Defaults",  icon='FILE_REFRESH')
+
+        #Animation Baking
+        header, panel = layout.panel("facial_baking", default_closed=False)
+        header.label(text="Animation Baking", icon='REC')
+
+        if panel:
+            col = panel.column(align=True)
+            row = col.row(align=True)
+            row.operator("cp77.bake_facial_animation",  text="Bake",  icon='REC')
+            row.operator("cp77.clear_facial_animation", text="Clear", icon='X')
+
+        #  JALI Lipsync
+        header, panel = layout.panel("facial_jali", default_closed=True)
+        header.label(text="JALI Lipsync", icon_value=get_icon("RELIC"))
+
+        if panel:
+            # Dependency status
+            deps_ok = PARSELMOUTH_AVAILABLE
+            if not deps_ok:
+                box = panel.box()
+                box.label(text="Dependencies required:", icon='ERROR')
+                row = box.row()
+                row.label(text="parselmouth",
+                          icon='CHECKMARK' if PARSELMOUTH_AVAILABLE else 'X')
+                row = box.row()
+                row.label(text="g2p_en (optional)",
+                          icon='CHECKMARK' if G2P_AVAILABLE else 'X')
+                box.operator("cp77_facial.install_jali_deps",
+                             text="Install Dependencies", icon='IMPORT')
+            elif not loaded:
+                panel.label(text="Load a facial setup first.", icon='INFO')
+            else:
+                if not G2P_AVAILABLE:
+                    row = panel.row()
+                    row.label(text="g2p_en not installed — transcript mode unavailable",
+                              icon='INFO')
+
+                col = panel.column(align=True)
+                col.operator("cp77.generate_jali_lipsync",
+                             text="Generate JALI Lipsync")
+                col.operator("cp77.preview_facial_pose",
+                             text="Preview JALI Pose")
+
+        # Real-Time Solver
+        if loaded:
+            from . import solver as _solver
+
+            active = _solver.is_solver_active()
+            header, panel = layout.panel("facial_solver", default_closed=True)
+            header.label(text="Real-Time Solver",
+                         icon='REC' if active else 'PLAY')
+
+            if panel:
+                row = panel.row(align=True)
+                row.scale_y = 1.15
+                row.operator(
+                    "cp77_facial.toggle_solver",
+                    text="Stop Solver" if active else "Start Solver",
+                    icon='PAUSE' if active else 'PLAY',
+                    depress=active,
+                )
+
+                # Timing readout
+                timing = bpy.app.driver_namespace.get("cp77_facial_last_ms", {})
+                if timing:
+                    tcol = panel.column(align=True)
+                    tcol.scale_y = 0.85
+                    for name, ms in timing.items():
+                        tcol.label(text=f"{name}: {ms:.1f} ms", icon='TIME')
+
+                row = panel.row()
+                row.operator("cp77_facial.solve_now", text="Solve Now",
+                              icon='RENDER_STILL')
+
+
+class CP77_UL_AnimList(bpy.types.UIList):
+    """UI List for displaying animations with filtering support"""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            obj = context.active_object
+            if not obj or not obj.animation_data:
+                return
+
+            active_action = obj.animation_data.action
+            selected = item == active_action
+
+            # Determine SIMD status for this action
+            _hints = item.get("optimizationHints", None)
+            _is_simd = False
+            if _hints is not None:
+                try:
+                    _is_simd = bool(_hints.get("preferSIMD", False)) if hasattr(_hints, 'get') else bool(_hints["preferSIMD"])
+                except (KeyError, TypeError):
+                    pass
+            _simd_icon = 'FORCE_MAGNETIC' if _is_simd else 'FORCE_CHARGE'
+
+            row = layout.row(align=True)
+
+            # Play/pause control
             if selected and context.screen.is_animation_playing:
-                op = sub.operator('screen.animation_cancel', icon='PAUSE', text=action.name, emboss=True)
+                op = row.operator('screen.animation_cancel', icon='PAUSE', text="", emboss=False)
                 op.restore_frame = False
-                if active_action.use_frame_range:
-                    row.prop(active_action, 'use_cyclic', icon='CON_FOLLOWPATH', text="")
             else:
                 icon = 'PLAY' if selected else 'TRIA_RIGHT'
-                op = sub.operator('cp77.set_animset', icon=icon, text="", emboss=True)
-                op.name = action.name
+                op = row.operator('cp77.set_animset', icon=icon, text="", emboss=False)
+                op.name = item.name
                 op.play = True
-                op = row.operator('cp77.set_animset', text=action.name)
-                op.name = action.name
-                op.play = False
-                row.operator('cp77.delete_anims', icon='X', text="").name = action.name
 
-### allow deleting animations from the animset panel, regardless of editor context
-class CP77AnimsDelete(Operator):
-    bl_idname = 'cp77.delete_anims'
-    bl_label = 'Delete action'
-    bl_options = {'INTERNAL', 'UNDO'}
-    bl_description = "Delete this action"
-
-    name: StringProperty()
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object and context.active_object.animation_data
-
-    def execute(self, context):
-        delete_anim(self, context)
-        return{'FINISHED'}
-
-class LoadAPose(Operator):
-    bl_idname = 'cp77.load_apose'
-    bl_label = 'Load A-Pose'
-
-    def execute(self, context):
-        try:
-            arm_obj = context.object
-            if not arm_obj or arm_obj.type != 'ARMATURE':
-                self.report({'ERROR'}, "Select an armature object.")
-                return {'CANCELLED'}
-
-            arm_data = arm_obj.data
-            arm_data["T-Pose"] = False
-
-            # First always load single base A-pose
-            load_apose(self, arm_obj)
-
-            return {'FINISHED'}
-
-        except Exception as e:
-            print(traceback.format_exc())
-            self.report({'ERROR'}, f"Failed: {e}")
-            return {'CANCELLED'}
-
-class LoadTPose(Operator):
-    bl_idname = "cp77.load_tpose"
-    bl_label = "Load T-Pose"
-
-    def execute(self, context):
-        arm_obj = context.object
-        if not arm_obj or arm_obj.type != 'ARMATURE':
-            self.report({'ERROR'}, "This isnt' an armature, can't load T-Pose")
-            return {'CANCELLED'}
-        try:    
-            load_tpose(self, arm_obj)
-            return {'FINISHED'}
-        
-        except Exception as e:
-            print(traceback.format_exc())
-            self.report({'ERROR'}, f"Failed: {e}")
-            return{'CANCELLED'}
-
-# this class is where most of the function is so far - play/pause
-# Todo: fix renaming actions from here
-class CP77Animset(Operator):
-    bl_idname = 'cp77.set_animset'
-    bl_label = "Available Animsets"
-    bl_options = {'INTERNAL', 'UNDO'}
-
-    name: StringProperty(options={'HIDDEN'})
-    new_name: StringProperty(name="New name", default="")
-    play: BoolProperty(options={'HIDDEN'}, default=False)
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object and context.active_object.animation_data
-
-    def execute(self, context):
-        obj = context.active_object
-        if not self.name:
-            obj.animation_data.action = None
-            return {'FINISHED'}
-
-        action = bpy.data.actions.get(self.name, None)
-        if not action:
-            return {'CANCELLED'}
-
-        # Always save it, just in case
-        action.use_fake_user = True
-
-        if self.new_name:
-            # Rename
-            action.name = self.new_name
-        elif not self.play and obj.animation_data.action == action:
-            # Action was already active, stop editing
-            obj.animation_data.action = None
-        else:
-            reset_armature(self,context)
-            obj.animation_data.action = action
-
-            if self.play:
-                context.scene.frame_current = int(action.curve_frame_range[0])
-                bpy.ops.screen.animation_cancel(restore_frame=False)
-                play_anim(self,context,action.name)
-
-        return {'FINISHED'}
-
-    def invoke(self, context, event):
-        if event.ctrl:
-            return context.window_manager.invoke_props_dialog(self)
-        else:
-            self.new_name = ""
-            return self.execute(context)
-
-class CP77ToRigify(Operator):
-    bl_idname = "rigify_generator.cp77"
-    bl_parent_id = "CP77_PT_animspanel"
-    bl_options = {'REGISTER', 'UNDO'}
-    bl_label = "Generate Rigify"
-    bl_description = "Generate a Rigify Control Rig for the selected Cyberpunk 2077 Armature"
-
-    def execute(self, context):
-        cp77_to_rigify()
-        return{'FINISHED'}
-
-class CP77BoneHider(Operator):
-    bl_idname = "bone_hider.cp77"
-    bl_parent_id = "CP77_PT_animspanel"
-    bl_options = {'REGISTER', 'UNDO'}
-    bl_label = "Toggle Deform Bone Visibilty"
-    bl_description = "Hide deform bones in the selected armature"
-
-    def execute(self, context):
-        hide_extra_bones(self, context)
-        return{'FINISHED'}
-
-class CP77BoneUnhider(Operator):
-    bl_idname = "bone_unhider.cp77"
-    bl_parent_id = "CP77_PT_animspanel"
-    bl_options = {'REGISTER', 'UNDO'}
-    bl_label = "Toggle Deform Bone Visibilty"
-    bl_description = "Unhide deform bones in the selected armature"
-
-    def execute(self, context):
-        unhide_extra_bones(self, context)
-        return{'FINISHED'}
-
-# inserts a keyframe on the current frame
-class CP77Keyframe(Operator):
-    bl_idname = "insert_keyframe.cp77"
-    bl_parent_id = "CP77_PT_animspanel"
-    bl_label = "Keyframe Pose"
-    bl_description = "Insert a Keyframe"
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
-
-    def execute(self, context):
-        props = context.scene.cp77_panel_props
-        cp77_keyframe(props, context, props.frameall)
-        return {"FINISHED"}
-
-    def draw(self, context):
-        layout = self.layout
-        props = context.scene.cp77_panel_props
-        row = layout.row(align=True)
-        row.label(text="Insert a keyframe for every bone at every from of the animation")
-        row = layout.row(align=True)
-        row.prop(props, "frameall", text="")
-
-class CP77ResetArmature(Operator):
-    bl_idname = "reset_armature.cp77"
-    bl_parent_id = "CP77_PT_animspanel"
-    bl_label = "Reset Armature Position"
-    bl_description = "Clear all transforms on current selected armature"
-
-    def execute(self, context):
-        reset_armature(self, context)
-        return {"FINISHED"}
-
-class CP77DeleteUnusedBones(Operator):
-    bl_idname = "delete_unused_bones.cp77"
-    bl_parent_id = "CP77_PT_animspanel"
-    bl_label = "Delete unused bones"
-    bl_description = "Delete all bones that aren't used by meshes parented to the armature"
-
-    def execute(self, context):
-        delete_unused_bones(self, context)
-        return {"FINISHED"}
-
-class CP77NewAction(Operator):
-
-    bl_idname = 'cp77.new_action'
-    bl_label = "Add Action"
-    bl_options = {'INTERNAL', 'UNDO'}
-    bl_description = "Add a new action to the list"
-
-    name: StringProperty(default="New action")
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object is not None
-
-    def execute(self, context):
-        obj = context.active_object
-
-
-    def invoke(self, context, event):
-        obj = context.active_object
-        if not obj.animation_data:
-            obj.animation_data_create()
-        new_action = bpy.data.actions.new(self.name)
-        new_action.use_fake_user = True
-        reset_armature(obj, context)
-        obj.animation_data.action = new_action
-        return {'FINISHED'}
-
-class CP77RigLoader(Operator):
-    bl_idname = "cp77.rig_loader"
-    bl_label = "Load Deform Rig from Resources"
-    bl_description = "Load Cyberpunk 2077 deform rigs from plugin resources"
-
-    files: CollectionProperty(type=OperatorFileListElement)
-    appearances: StringProperty(name="Appearances", default="")
-    directory: StringProperty(name="Directory", default="")
-    filepath: StringProperty(name="Filepath", default="")
-    rigify_it: BoolProperty(name='Apply Rigify Rig', default=False)
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
-
-    def execute(self, context):
-        props = context.scene.cp77_panel_props
-        selected_rig_name = props.body_list
-        rig_files, rig_names = cp77riglist(self,context)
-
-        if selected_rig_name in rig_names:
-            # Find the corresponding .glb file and load it
-            selected_rig = rig_files[rig_names.index(selected_rig_name)]
-            self.filepath = selected_rig
-            CP77GLBimport(self, exclude_unused_mats=True, image_format='PNG',
-                          filepath=selected_rig, hide_armatures=False, import_garmentsupport=False, files=[], directory='', appearances="ALL", remap_depot=False, scripting=True)
-            if props.fbx_rot:
-                rotate_quat_180(self,context)
-            if self.rigify_it:
-                cp77_to_rigify()
-        return {'FINISHED'}
-
-    def draw(self,context):
-        props = context.scene.cp77_panel_props
-        layout = self.layout
-        box = layout.box()
-        row = box.row(align=True)
-        row.label(text="Select rig to load: ")
-        row.prop(props, 'body_list', text="",)
-        col = box.column()
-        col.prop(self, 'rigify_it', text="Generate Rigify Control Rig")
-        col.prop(props, 'fbx_rot', text="Load Rig in FBX Orientation")
-
-class CP77AnimNamer(Operator):
-    bl_idname = "cp77.anim_namer"
-    bl_label = "Fix Action Names"
-    bl_options = {'INTERNAL', 'UNDO'}
-    bl_description = "replace spaces and capital letters in animation names with underscores and lower case letters"
-
-    def execute(self, context):
-        for a in CP77AnimsList(self,context): a.name = a.name.replace(" ", "_").lower()
-        return {'FINISHED'}
-
-
-_CACHE = {"rig": None, "setup": None, "rig_path": "", "setup_path": ""}
-
-
-def _set_cache(rig, setup, rig_path: str, setup_path: str):
-    _CACHE["rig"] = rig
-    _CACHE["setup"] = setup
-    _CACHE["rig_path"] = rig_path
-    _CACHE["setup_path"] = setup_path
-
-
-class CP77_FacialProps(PropertyGroup):
-    rig_json: StringProperty(name="Rig JSON", subtype='FILE_PATH')  
-    facial_json: StringProperty(name="FacialSetup JSON", subtype='FILE_PATH')  
-    main_pose: IntProperty(name="Main Pose", default=1, min=1,max=133, step=1)  
-
-class CP77_OT_LoadFacial(Operator):
-    bl_idname = "cp77.load_facial"
-    bl_label = "Load Rig + FacialSetup"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        props = context.scene.cp77_facial
-        try:
-            rig = load_wkit_rig_skeleton(props.rig_json or "")
-            setup = load_wkit_facialsetup(props.facial_json or "", rig)
-        except Exception as e:
-            self.report({'ERROR'}, f"Load failed: {e}")
-            return {'CANCELLED'}
-        _set_cache(rig, setup, props.rig_json or "", props.facial_json or "")
-        try:
-            nb = int(getattr(rig, 'num_bones', 0)); mp = int(setup.face_main_bank.q.shape[0])
-        except Exception:
-            nb, mp = 0, 0
-        self.report({'INFO'}, f"Loaded bones={nb}, mainPoses={mp}")
-        return {'FINISHED'}
-
-
-class CP77_OT_ApplyMainPose(bpy.types.Operator):
-    bl_idname = "cp77.apply_main_pose"
-    bl_label = "Apply (Full Solver)"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def _ensure_loaded(self, context) -> bool:
-        if _CACHE["rig"] is not None and _CACHE["setup"] is not None:
-            return True
-        props = context.scene.cp77_facial
-        if props.rig_json and props.facial_json:
-            try:
-                rig = load_wkit_rig_skeleton(props.rig_json)
-                setup = load_wkit_facialsetup(props.facial_json, rig)
-                _set_cache(rig, setup, props.rig_json, props.facial_json)
-                return True
-            except Exception:
-                return False
-        return False
-
-    # --- math helpers (local; names stable) ---
-    @staticmethod
-    def _quat_normalize(q: np.ndarray) -> np.ndarray:
-        n = np.linalg.norm(q, axis=-1, keepdims=True); n[n == 0] = 1.0; return q / n
-
-    @staticmethod
-    def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        ax, ay, az, aw = np.moveaxis(a, -1, 0); bx, by, bz, bw = np.moveaxis(b, -1, 0)
-        x = aw * bx + ax * bw + ay * bz - az * by
-        y = aw * by - ax * bz + ay * bw + az * bx
-        z = aw * bz + ax * by - ay * bx + az * bw
-        w = aw * bw - ax * bx - ay * by - az * bz
-        return np.stack([x, y, z, w], axis=-1)
-
-    @staticmethod
-    def _slerp(q0: np.ndarray, q1: np.ndarray, t: np.ndarray) -> np.ndarray:
-        dot = np.sum(q0 * q1, axis=-1, keepdims=True)
-        sign = np.where(dot < 0, -1.0, 1.0)
-        q1 = q1 * sign
-        dot = np.clip(np.abs(dot), 0.0, 1.0)
-        eps = 1e-6
-        use_lerp = dot > 1 - eps
-        theta = np.arccos(dot)
-        sin_theta = np.sin(theta)
-        w0 = np.where(use_lerp, 1 - t, np.sin((1 - t) * theta) / np.where(sin_theta == 0, 1, sin_theta))
-        w1 = np.where(use_lerp, t, np.sin(t * theta) / np.where(sin_theta == 0, 1, sin_theta))
-        out = CP77_OT_ApplyMainPose._quat_normalize(q0 * w0 + q1 * w1)
-        return out
-
-    @staticmethod
-    def _additive_local_pose_only(base_q: np.ndarray, base_t: np.ndarray, base_s: np.ndarray,
-                                  add_q: np.ndarray, add_t: np.ndarray, add_s: np.ndarray,
-                                  weight: float, mask_indices: Optional[list] = None):
-        """Apply additive LS deltas with optional sparse bone mask."""
-        ident = np.zeros_like(add_q); ident[..., 3] = 1.0
-        w = float(np.clip(weight, 0.0, 1.0))
-        if w <= 1e-6:
-            return base_q, base_t, base_s
-        if mask_indices is None or len(mask_indices) == 0:
-            tw = np.full((base_q.shape[0], 1), w, dtype=base_q.dtype)
-            dq = CP77_OT_ApplyMainPose._slerp(ident, add_q, tw)
-            out_q = CP77_OT_ApplyMainPose._quat_mul(base_q, dq)
-            out_t = base_t + add_t * tw
-            out_s = base_s * (1.0 + (add_s - 1.0) * tw)
-            return CP77_OT_ApplyMainPose._quat_normalize(out_q), out_t, out_s
-        # sparse path
-        out_q = base_q.copy(); out_t = base_t.copy(); out_s = base_s.copy()
-        for i in mask_indices:
-            if i < 0 or i >= base_q.shape[0]:
-                continue
-            dq = CP77_OT_ApplyMainPose._slerp(ident[i:i+1], add_q[i:i+1], np.array([[w]], dtype=base_q.dtype))
-            out_q[i] = CP77_OT_ApplyMainPose._quat_mul(base_q[i:i+1], dq)[0]
-            out_t[i] = base_t[i] + add_t[i] * w
-            out_s[i] = base_s[i] * (1.0 + (add_s[i] - 1.0) * w)
-        return CP77_OT_ApplyMainPose._quat_normalize(out_q), out_t, out_s
-
-    @staticmethod
-    def _pose_mask_from_bank_pose(bank, idx: int) -> Optional[list]:
-        q = bank.q[idx]; t = bank.t[idx]; s = bank.s[idx]
-        qi = np.zeros_like(q); qi[..., 3] = 1.0
-        changed = (np.abs(q - qi).max(axis=-1) > 1e-6) | (np.abs(t).max(axis=-1) > 1e-9) | (np.abs(s - 1.0).max(axis=-1) > 1.0e-6)
-        ids = np.where(changed)[0]
-        return ids.tolist() if ids.size else None
-
-    @staticmethod
-    def _local_deltas(ref_q: np.ndarray, ref_t: np.ndarray, ref_s: np.ndarray,
-                      q: np.ndarray, t: np.ndarray, s: np.ndarray):
-        rx, ry, rz, rw = np.moveaxis(ref_q, -1, 0)
-        inv_ref = np.stack([-rx, -ry, -rz, rw], axis=-1)
-        ax, ay, az, aw = np.moveaxis(inv_ref, -1, 0)
-        bx, by, bz, bw = np.moveaxis(q, -1, 0)
-        dq = np.stack([
-            aw * bx + ax * bw + ay * bz - az * by,
-            aw * by - ax * bz + ay * bw + az * bx,
-            aw * bz + ax * by - ay * bx + az * bw,
-            aw * bw - ax * bx - ay * by - az * bz,
-        ], axis=-1)
-        dq = CP77_OT_ApplyMainPose._quat_normalize(dq)
-        dt = t - ref_t
-        ds = s / np.where(ref_s == 0.0, 1.0, ref_s)
-        return dq, dt, ds
-
-    @staticmethod
-    def _swap_yz_trn_rot(dt: np.ndarray, dq: np.ndarray):
-        """Map JSON space → Blender space: (x, y, z) → (x, -z, y) and rotate quats by +90° around X.
-        Applies to translations and rotations only (scales unchanged).
-        """
-        # translation: [x, -z, y]
-        dt_sw = np.stack([dt[:, 0], -dt[:, 2], dt[:, 1]], axis=-1)
-        # rotation: q' = s * q * s^{-1}, s = rotX(+90°)
-        s = np.array([np.sqrt(0.5, dtype=dq.dtype), 0.0, 0.0, np.sqrt(0.5, dtype=dq.dtype)], dtype=dq.dtype)
-        s_inv = s.copy(); s_inv[:3] *= -1.0
-        s_b = np.broadcast_to(s, dq.shape)
-        s_inv_b = np.broadcast_to(s_inv, dq.shape)
-        q_tmp = CP77_OT_ApplyMainPose._quat_mul(s_b, dq)
-        dq_sw = CP77_OT_ApplyMainPose._quat_mul(q_tmp, s_inv_b)
-        return dt_sw, dq_sw
-
-    def execute(self, context):
-        if not self._ensure_loaded(context):
-            self.report({'ERROR'}, "Load rig + facialsetup first.")
-            return {'CANCELLED'}
-        rig = _CACHE["rig"]; setup = _CACHE["setup"]
-
-        obj = context.active_object
-        if obj is None or obj.type != 'ARMATURE':
-            self.report({'ERROR'}, 'Select an Armature object.')
-            return {'CANCELLED'}
-
-        # Build tracks from armature custom properties (names from rig.track_names)
-        tracks = build_tracks_from_armature(obj, rig)
-
-        # Optional convenience: force controller of selected main pose to >= 1.0
-        p = int(max(0, context.scene.cp77_facial.main_pose))
-        try:
-            ctrl_trk = int(setup.face_meta.mainposes_track[p])
-            if 0 <= ctrl_trk < tracks.shape[0]:
-                tracks[ctrl_trk] = max(1.0, float(tracks[ctrl_trk]))
-        except Exception:
-            pass
-
-        try:
-            res = solve_tracks_face(setup, rig, tracks)
-        except Exception as e:
-            self.report({'ERROR'}, f'Solver error: {e}')
-            return {'CANCELLED'}
-
-        inbtw = np.asarray(res.get('inbetween_weights', np.zeros((0,), dtype=np.float32)))
-        corr  = np.asarray(res.get('corrective_weights', np.zeros((0,), dtype=np.float32)))
-
-        # Start from reference LS; apply in-between & corrective banks additively
-        q_ls = rig.ls_q.copy(); t_ls = rig.ls_t.copy(); s_ls = rig.ls_s.copy()
-
-        # Apply main in-betweens
-        Pm_bank = getattr(setup.face_main_bank, 'q', np.zeros((0,))).shape[0]
-        Pm_apply = int(min(Pm_bank, inbtw.shape[0]))
-        eps = 1e-6
-        for pi in range(Pm_apply):
-            w = float(inbtw[pi])
-            if w <= eps:
-                continue
-            mask_ids = self._pose_mask_from_bank_pose(setup.face_main_bank, pi)
-            q_ls, t_ls, s_ls = self._additive_local_pose_only(q_ls, t_ls, s_ls,
-                                                              setup.face_main_bank.q[pi],
-                                                              setup.face_main_bank.t[pi],
-                                                              setup.face_main_bank.s[pi],
-                                                              w, mask_ids)
-
-        # Apply correctives
-        Pc_bank = getattr(setup.face_corrective_bank, 'q', np.zeros((0,))).shape[0]
-        Pc_apply = int(min(Pc_bank, corr.shape[0]))
-        for ci in range(Pc_apply):
-            w = float(corr[ci])
-            if w <= eps:
-                continue
-            mask_ids = self._pose_mask_from_bank_pose(setup.face_corrective_bank, ci)
-            q_ls, t_ls, s_ls = self._additive_local_pose_only(q_ls, t_ls, s_ls,
-                                                              setup.face_corrective_bank.q[ci],
-                                                              setup.face_corrective_bank.t[ci],
-                                                              setup.face_corrective_bank.s[ci],
-                                                              w, mask_ids)
-
-        # Convert LS to deltas against reference
-        dq, dt, ds = self._local_deltas(rig.ls_q, rig.ls_t, rig.ls_s, q_ls, t_ls, s_ls)
-        # Map JSON space → Blender space (translation & rotation)
-        dt2, dq2 = self._swap_yz_trn_rot(dt, dq)
-
-        import mathutils
-        if context.object.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-        bones = obj.pose.bones
-        for i, name in enumerate(rig.bone_names):
-            pb = bones.get(name)
-            if pb is None:
-                continue
-            pb.location = mathutils.Vector((float(dt2[i, 0]), float(dt2[i, 1]), float(dt2[i, 2])))
-            pb.rotation_mode = 'QUATERNION'
-            pb.rotation_quaternion = mathutils.Quaternion((float(dq2[i, 3]), float(dq2[i, 0]), float(dq2[i, 1]), float(dq2[i, 2])))
-            pb.scale = mathutils.Vector((float(ds[i, 0]), float(ds[i, 1]), float(ds[i, 2])))
-        obj.update_tag(refresh={'DATA'}); context.view_layer.update()
-
-        self.report({'INFO'}, 'Applied facial pose.')
-        return {'FINISHED'}
-
-class CP77_OT_ResetNeutral(Operator):
-    bl_idname = "cp77.reset_neutral"
-    bl_label = "Reset to Rest"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        obj = context.active_object
-        if obj is None or obj.type != 'ARMATURE':
-            self.report({'ERROR'}, 'Select an Armature object.')
-            return {'CANCELLED'}
-        if context.object.mode != 'POSE':
-            bpy.ops.object.mode_set(mode='POSE')
-        for pb in obj.pose.bones:
-            pb.matrix_basis.identity()
-        obj.update_tag(refresh={'DATA'}); context.view_layer.update()
-        return {'FINISHED'}
-
-class CP77_PT_FacialPreview(Panel):
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'CP77 Modding'
-    bl_parent_id = 'CP77_PT_animspanel'
-    bl_options = {'DEFAULT_CLOSED'} 
-    bl_label = 'Facial Pose Tools'
-    def draw(self, context):
-        layout = self.layout
-        props = context.scene.cp77_facial
-        col = layout.column(align=True)
-        col.prop(props, "rig_json")
-        col.prop(props, "facial_json")
-        row = layout.row(align=True)
-        row.operator("cp77.load_facial", icon='FILE_FOLDER')
-        layout.separator()
-        col = layout.column(align=True)
-        col.prop(props, "main_pose")
-        row = layout.row(align=True)
-        row.operator("cp77.apply_main_pose", text="Apply Facial Pose", icon='PLAY')
-        row.operator("cp77.reset_neutral", text="", icon='ARMATURE_DATA')
-
-operators, other_classes = get_classes(sys.modules[__name__])
-
+            # Animation name
+            op = row.operator('cp77.set_animset', text=item.name, emboss=False)
+            op.name = item.name
+            op.play = False
+
+            # Cyclic toggle for active animation with frame range
+            if selected and active_action and active_action.use_frame_range:
+                row.prop(active_action, 'use_cyclic', icon='CON_FOLLOWPATH', text="", emboss=False)
+
+            # SIMD encoding toggle
+            row.operator('cp77.toggle_simd', icon=_simd_icon, text="", emboss=False).name = item.name
+
+            # Delete action
+            row.operator('cp77.delete_anims', icon='X', text="", emboss=False).name = item.name
+
+        elif self.layout_type in {'GRID'}:
+            layout.alignment = 'CENTER'
+            layout.label(text="", icon='ACTION')
+
+    def filter_items(self, context, data, propname):
+        """Filter and sort items in the list"""
+        actions = getattr(data, propname)
+        helper_funcs = bpy.types.UI_UL_list
+
+        # Default return values
+        flt_flags = []
+        flt_neworder = []
+
+        # Filter by name
+        if self.filter_name:
+            flt_flags = helper_funcs.filter_items_by_name(
+                    self.filter_name,
+                    self.bitflag_filter_item,
+                    actions,
+                    "name",
+                    reverse=False
+                    )
+
+        if not flt_flags:
+            flt_flags = [self.bitflag_filter_item] * len(actions)
+
+        # Sort alphabetically if requested
+        if self.use_filter_sort_alpha:
+            flt_neworder = helper_funcs.sort_items_by_name(actions, "name")
+
+        return flt_flags, flt_neworder
 
 def register_animtools():
-    for cls in operators:
-        if not hasattr(bpy.types, cls.__name__):
-            bpy.utils.register_class(cls)
-    for cls in other_classes:
-        if not hasattr(bpy.types, cls.__name__):
-            bpy.utils.register_class(cls)
-        bpy.types.Scene.cp77_facial = bpy.props.PointerProperty(type=CP77_FacialProps)  
+    """Register all animation tool classes."""
+    # Register backend modules first (operators used by facial_ops and UI)
+    rig_binding.register()
+    pose_preview.register()
+    _solver_mod.register()
 
+    # Collect operators and panel classes from submodules
+    for mod in (anim_ops, facial_ops):
+        ops, others = get_classes(mod)
+        for cls in ops + others:
+            if not hasattr(bpy.types, cls.__name__):
+                try:
+                    register_class(cls)
+                except ValueError:
+                    pass
+
+    # Panel and UIList live here
+    for cls in (CP77_PT_AnimsPanel, CP77_UL_AnimList):
+        if not hasattr(bpy.types, cls.__name__):
+            try:
+                register_class(cls)
+            except ValueError:
+                pass
+
+    bpy.types.Scene.cp77_facial = bpy.props.PointerProperty(type=CP77_FacialProps)
+    root_motion.register_rm()
+    anim_events.register_anim_events()
 
 
 def unregister_animtools():
-    if hasattr(bpy.types.Scene, 'CP77_facial'):
+    """Unregister all animation tool classes."""
+    # Stop bone-line drawing if active.  _handle lives in anim_ops and is
+    # mutated there by BHLS_OT_Start/Stop
+    if anim_ops._handle is not None:
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(anim_ops._handle, 'WINDOW')
+        except Exception:
+            pass
+        anim_ops._handle = None
+
+    root_motion.unregister_rm()
+    anim_events.unregister_anim_events()
+
+    if hasattr(bpy.types.Scene, 'cp77_facial'):
         del bpy.types.Scene.cp77_facial
-    for cls in reversed(other_classes):
-        if hasattr(bpy.types, cls.__name__):
-            bpy.utils.unregister_class(cls)
-    for cls in reversed(operators):
-        if hasattr(bpy.types, cls.__name__):
-            bpy.utils.unregister_class(cls)
+
+    for mod in (facial_ops, anim_ops):
+        ops, others = get_classes(mod)
+        for cls in reversed(ops + others):
+            try:
+                unregister_class(cls)
+            except RuntimeError:
+                pass
+
+    for cls in reversed((CP77_PT_AnimsPanel, CP77_UL_AnimList)):
+        try:
+            unregister_class(cls)
+        except RuntimeError:
+            pass
+
+    # Unregister backend modules (reverse order of register)
+    _solver_mod.unregister()
+    pose_preview.unregister()
+    rig_binding.unregister()

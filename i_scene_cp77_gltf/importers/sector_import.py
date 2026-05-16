@@ -27,12 +27,15 @@ import time
 import traceback
 from pprint import pprint
 from ..main.setup import MaterialBuilder, bcolors
-from ..collisiontools.collisions import set_collider_props
+from ..collisiontools.pxbridge.io_phys import import_collider_as_actor
 from .collision_mesh_import import CP77CollisionTriangleMeshJSONimport_by_hashes
 from operator import add
 import bmesh
-from .entity_import import *
+from .entity_import import importEnt
 from .import_with_materials import *
+from .import_common import *
+from bpy_extras import anim_utils
+
 VERBOSE=True
 scale_factor=1
 
@@ -66,28 +69,6 @@ def assign_custom_properties(obj, data, sectorName, i, **kwargs ):
     for key, value in kwargs.items():
         obj[key] = value
 
-def get_groupname(meshname, meshAppearance):
-    groupname = os.path.splitext(os.path.split(meshname)[-1])[0]
-    if 'intersection' in meshname:
-        groupname = os.path.dirname(meshname).split(os.sep)[-1] + '_' + groupname
-    if len(meshAppearance)>0:
-        groupname += '@' + meshAppearance
-    while len(groupname) > 63:
-        groupname = groupname[:-1]
-    return groupname
-
-# Get the group name for the mesh based on its name and appearance
-# group, groupname = get_group(meshname,meshAppearance)
-def get_group(meshname,meshAppearance,Masters):
-    groups= [g for g in Masters.children if 'meshpath' in g.keys() and g['meshpath']==meshname and 'appearance' in g.keys() and g['appearance']==meshAppearance]
-    if len(groups)>0:
-        group=groups[0]
-        groupname = group.name
-    else:
-        groupname = get_groupname(meshname, meshAppearance)
-        group = Masters.children.get(groupname)
-        
-    return group, groupname 
 
 def find_debugName(obj):
     debugName=None
@@ -198,20 +179,6 @@ def get_pos_whole(inst):
         pos[2] = inst['position']['Z']
     return pos
 
-# add_to_list(m , meshes_w_apps)
-def add_to_list(basename, meshes, dict):
-     mesh = meshes[basename]
-     if basename in dict:
-        for app in mesh['appearances']:
-            if app not in dict[basename]['apps']:
-                dict[basename]['apps'].append(mesh['appearance'])
-        if mesh['sector'] not in dict[basename]['sectors']:
-            dict[basename]['sectors'].append(mesh['sector'])
-     else:
-        dict[basename]={'apps':[mesh['appearances']],'sectors':[mesh['sector']]}
-
-
-
 
 def get_col(color):
     col=[0,0,0]
@@ -249,6 +216,7 @@ def get_meshname(data):
         meshname = data['entityTemplate']['DepotPath']['$value'].replace('\\', os.sep)
     return meshname
 
+
 def importSectors( filepath, with_mats, remap_depot, want_collisions, am_modding, with_lights):
     cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
     if not cp77_addon_prefs.non_verbose:
@@ -260,8 +228,7 @@ def importSectors( filepath, with_mats, remap_depot, want_collisions, am_modding
     # Set this to true to limit import to the types listed in the import_types list.
     limittypes=False
     import_types=None
-    import_types=['worldEntityNode'
-    ]
+    #import_types=['worldEntityNode'    ]
     wkit_proj_name=os.path.basename(filepath)
     # Enter the path to your projects source\raw\base folder below, needs double slashes between folder names.
     path = os.path.join( os.path.dirname(filepath),'source','raw')
@@ -418,76 +385,8 @@ def importSectors( filepath, with_mats, remap_depot, want_collisions, am_modding
     from_mesh_no=0
     to_mesh_no=100000
 
-    for i,m in enumerate(meshes_w_apps):
-        if i>=from_mesh_no and i<=to_mesh_no and (m[-4:]=='mesh' or m[-13:]=='physicalscene' or m[-6:]=='w2mesh'):
-            apps=[]
-            for meshApp in meshes_w_apps[m]['apps'][0]:
-                if meshApp['$value'] not in apps and meshApp['$value']!='':                   
-                    apps.append(meshApp['$value'])
-            #if len(apps)>1:
-            #    print(len(apps))
-            #impapps=','.join(apps)
-            #print(os.path.join(path, m[:-4]+'glb'),impapps)
-            if m[-13:]=='physicalscene' or m[-6:]=='w2mesh':
-                meshpath=os.path.join(path, m+'.glb').replace('\\', os.sep)
-                print('not a standard mesh')
-            else:
-                meshpath=os.path.join(path, m[:-1*len(os.path.splitext(m)[1])]+'.glb').replace('\\', os.sep)
-            print(meshpath)
-            groupname = get_groupname(meshpath, '')
-            
-            if groupname not in Masters.children.keys() and os.path.exists(meshpath):
-                try:
-                    
-                    CP77GLBimport( with_materials=with_mats,remap_depot= props.remap_depot, filepath=meshpath, appearances=apps,scripting=True)
-                    
-                    #bpy.ops.io_scene_gltf.cp77(with_mats, filepath=meshpath, appearances=impapps,scripting=True)
-                    objs = C.selected_objects
-                    if objs[0].users_collection[0].name!= groupname:
-                        objs[0].users_collection[0].name= groupname
-                    move_coll= coll_scene.children.get( objs[0].users_collection[0].name )
-                    move_coll['meshpath']=m
-                    move_coll['appearance']='default'
-                    Masters.children.link(move_coll)
-                    for app in apps:
-                        # Create a completely new collection for this appearance
-                        new_coll = bpy.data.collections.new(groupname + '@' + app)
-                        Masters.children.link(new_coll)
-                        new_coll['meshpath']=m
-                        new_coll['appearance'] = app
-                        # Set the appearance property
-                        json_apps= None
-                        if 'json_apps' in move_coll.keys():
-                            json_apps =  json.loads(move_coll['json_apps'])
-                        else:
-                            print(f'{bcolors.FAIL}No material json found for - {m}{bcolors.ENDC}')
-                        for idx,obj in enumerate(move_coll.objects):
-                            obj_copy=obj.copy()
-                            obj_copy.data = obj.data.copy()
-                            if obj_copy.type == 'MESH':
-                                if json_apps and app in json_apps and idx < len(json_apps[app]):
-                                    # Assign the material from the json_apps if it exists
-                                    mat_name = json_apps.get(app)[idx]
-                                    if 'sidewalk' in m:
-                                        mat_name = 'sidewalksidewalksidewalksidewalksidewalksidewalksidewalksidewalksidewalk'
-                                        #print('Its too damn long', mat_name)
-                                        #print(obj_copy.data.materials.keys())
-                                    #if 'station' in groupname or 'fluorescent_light_b' in groupname:
-                                    #    print('Pause here')
-                                    #    print(mat_name, list(obj_copy.data.materials.keys()), mat_name in obj_copy.data.materials.keys())
-                                    #if mat_name and mat_name in bpy.data.materials:
-                                    if len(mat_name)<63 and len(obj_copy.data.materials)>1 and mat_name in obj_copy.data.materials.keys():
-                                        for ii in range(len(obj_copy.data.materials)-1,-1,-1):
-                                            mat=obj_copy.data.materials.keys()[ii]
-                                            if mat.split('.')[0]!=mat_name:
-                                                obj_copy.data.materials.pop(index=ii)
-                            new_coll.objects.link(obj_copy)                    
-                    coll_scene.children.unlink(move_coll)
-                except:
-                    print('failed on ',os.path.basename(meshpath))                    
-                    print(traceback.print_exc())
-            elif not os.path.exists(meshpath):
-                print('Mesh ', meshpath, ' does not exist')
+    meshes_from_mesheswapps( meshes_w_apps,path, from_mesh_no=from_mesh_no, to_mesh_no=to_mesh_no, with_mats=with_mats, glbs=glbs, mesh_jsons=mesh_jsons,Masters=Masters)
+
     empty=[]
     for child in Masters.children:
         if len(child.objects)<1:
@@ -582,12 +481,11 @@ def importSectors( filepath, with_mats, remap_depot, want_collisions, am_modding
                             try:
                                 #print('Importing ',entpath, ' using app ',app)
                                 incoll='MasterInstances'
-                                importEnt(with_mats, filepath=entpath, appearances=[app], inColl=incoll,meshes=glbs,mesh_jsons=mesh_jsons, escaped_path=escaped_path, app_path=app_path,
-                                 anim_files=anim_files, rigjsons=rigjsons)
+                                importEnt(with_mats, filepath=entpath, appearances=[app], inColl=incoll,meshes=glbs,mesh_jsons=mesh_jsons, escaped_path=escaped_path, app_path=app_path, anim_files=anim_files, rigjsons=rigjsons)
                                 move_coll=Masters.children.get(ent_groupname)
                                 imported=True
                             except:
-                                print(traceback.print_exc())
+                                print(traceback.format_exc())
                                 print(f"Failed during Entity import on {entpath} from app {app}")
                         if imported:
                             instances = [x for x in t if x['NodeIndex'] == i]
@@ -1074,13 +972,15 @@ def importSectors( filepath, with_mats, remap_depot, want_collisions, am_modding
                                                         obj.hide_set(True)
                                                     if ntype=='worldRotatingMeshNode':
                                                         orig_rot= obj.rotation_quaternion
-                                                        obj.rotation_mode='XYZ'
+                                                        obj.rotation_mode='YXZ'
                                                         obj.keyframe_insert('rotation_euler', index=axis_no ,frame=1)
                                                         obj.rotation_euler[axis_no] = obj.rotation_euler[axis_no] +math.radians(360)
                                                         obj.keyframe_insert('rotation_euler', index=axis_no ,frame=rot_time*24)
                                                         if obj.animation_data.action:
                                                             obj_action = bpy.data.actions.get(obj.animation_data.action.name)
-                                                            obj_fcu = obj_action.fcurves[0]
+                                                            obj_slot = obj.animation_data.action_slot
+                                                            channelbag = anim_utils.action_get_channelbag_for_slot(obj_action, obj_slot)
+                                                            obj_fcu = channelbag.fcurves[0]
                                                             for pt in obj_fcu.keyframe_points:
                                                                 pt.interpolation = 'LINEAR'
 
@@ -1302,42 +1202,85 @@ def importSectors( filepath, with_mats, remap_depot, want_collisions, am_modding
                                 sector_Hash=e['Data']['sectorHash']
                                 arot=get_rot(act)
                                 for s,shape in enumerate(act['Shapes']):
-                                    if 'Size' in shape.keys():
-                                        ssize=(2*shape['Size']['X']*act['Scale']['X'],2*shape['Size']['Y']*act['Scale']['Y'],2*shape['Size']['Z']*act['Scale']['Z'])
-                                    else:
-                                        ssize=None
+                                    # We don't need ssize anymore because pxbridge handles scale internally!
                                     spos=get_pos(shape)
                                     srot=get_rot(shape)
                                     arot_q = Quaternion((arot[0],arot[1],arot[2],arot[3]))
                                     srot_q = Quaternion((srot[0],srot[1],srot[2],srot[3]))
                                     rot= arot_q @ srot_q
                                     loc=(spos[0]+x,spos[1]+y,spos[2]+z)
-                                    if shape['ShapeType']=='Box' or shape['ShapeType']=='Capsule' or shape['ShapeType']=='Sphere':
-                                        #print('Box Collision Node')
-                                        #pprint(act['Shapes'])
+                                    
+                                    # convert back from game type to native representation for bridge
+                                    physx_shape_type = shape['ShapeType']
+                                    bridge_shape_type = 'physicsColliderBox'
+                                    
+                                    if physx_shape_type in ('Box', 'Capsule', 'Sphere'):
+                                        shape_data = shape
+                                        
+                                        if physx_shape_type == 'Box':
+                                            bridge_shape_type = 'physicsColliderBox'
+                                            if 'Size' in shape:
+                                                # Bridge expects halfExtents vector Dict
+                                                shape_data = {
+                                                    'X': shape['Size']['X']*act['Scale']['X'],
+                                                    'Y': shape['Size']['Y']*act['Scale']['Y'],
+                                                    'Z': shape['Size']['Z']*act['Scale']['Z']
+                                                }
+                                            else:
+                                                shape_data = {'X': 0.5, 'Y': 0.5, 'Z': 0.5}
 
-                                        if shape['ShapeType']=='Box':
-                                            bpy.ops.mesh.primitive_cube_add(size=1/scale_factor, scale=(ssize[0],ssize[1],ssize[2]),location=(loc[0],loc[1],loc[2]))
-                                        elif shape['ShapeType']=='Capsule':
-                                            bpy.ops.mesh.primitive_cylinder_add(radius=5/scale_factor, depth=1/scale_factor, scale=(ssize[0],ssize[1],ssize[2]),location=loc)
-                                        elif shape['ShapeType']=='Sphere':
-                                            bpy.ops.mesh.primitive_uv_sphere_add(radius=5/scale_factor, scale=(ssize[0],ssize[1],ssize[2]),location=loc)
-                                        crash=C.selected_objects[0]
-                                        crash.name='NodeDataIndex_'+str(inst['nodeDataIndex'])+'_Actor_'+str(idx)+'_Shape_'+str(s)
-                                        par_coll=crash.users_collection[0]
-                                        par_coll.objects.unlink(crash)
-                                        sector_Collisions_coll.objects.link(crash)
-                                        crash['nodeIndex']=i
-                                        crash['nodeDataIndex']=inst['nodeDataIndex']
-                                        crash['ShapeType']=shape['ShapeType']
-                                        crash['ShapeNo']=s
-                                        crash['ActorIdx']=idx
-                                        crash['sectorName']=sectorName
-                                        crash['matrix']=crash.matrix_world
-                                        crash.rotation_mode='QUATERNION'
-                                        crash.rotation_quaternion=rot
-                                        set_collider_props(crash, shape['ShapeType'], shape['Materials'][0]['$value'], 'WORLD')
+                                        elif physx_shape_type == 'Capsule':
+                                            bridge_shape_type = 'physicsColliderCapsule'
+                                            radius = 0.5
+                                            if 'Size' in shape:
+                                                radius = shape['Size']['X']*act['Scale']['X']
+                                            shape_data = {'radius': radius, 'height': 1.0}
 
+                                        elif physx_shape_type == 'Sphere':
+                                            bridge_shape_type = 'physicsColliderSphere'
+                                            radius = 0.5
+                                            if 'Size' in shape:
+                                                radius = shape['Size']['X']*act['Scale']['X']
+                                            shape_data = {'radius': radius}
+                                            
+                                        submeshName = f'NodeDataIndex_{inst["nodeDataIndex"]}_Actor_{idx}_Shape_{s}'
+                                        physmat = shape.get('Materials', [{'$value': 'Default'}])[0]['$value']
+                                        
+                                        # It might make sense to create an empty parent object acting as the actor to hold these shapes
+                                        act_name = f'NodeDataIndex_{inst["nodeDataIndex"]}_Actor_{idx}'
+                                        act_obj = None
+                                        for child in sector_Collisions_coll.objects:
+                                            if child.name == act_name:
+                                                act_obj = child
+                                                break
+                                        if not act_obj:
+                                            act_obj = bpy.data.objects.new(act_name, None)
+                                            sector_Collisions_coll.objects.link(act_obj)
+                                            act_obj.location = (x, y, z)
+                                            act_obj.rotation_mode = "QUATERNION"
+                                            act_obj.rotation_quaternion = arot_q
+                                            act_obj['nodeType'] = 'worldCollisionNode'
+                                            act_obj['nodeIndex'] = i
+                                            act_obj['nodeDataIndex'] = inst['nodeDataIndex']
+                                            act_obj['ActorIdx'] = idx
+                                            act_obj['sectorName'] = sectorName
+                                        
+                                        # Add the actual shape representation
+                                        try:
+                                            # Using the updated signature
+                                            shape_cdata = shape_data
+                                            if isinstance(shape_cdata, dict) and ('$type' not in shape_cdata):
+                                                shape_cdata['$type'] = bridge_shape_type
+                                                shape_cdata['localToBody'] = {
+                                                    'position': {'X': spos[0], 'Y': spos[1], 'Z': spos[2]},
+                                                    'orientation': {'r': srot[0], 'i': srot[1], 'j': srot[2], 'k': srot[3]}
+                                                }
+                                                shape_cdata['material'] = {'$value': physmat}
+                                            # The function expects cdata, submeshName, new_col, optionally obj
+                                            obj = import_collider_as_actor(shape_cdata, submeshName, sector_Collisions_coll, act_obj)
+                                        except Exception as e:
+                                            print('Error importing collision shape:', e)
+                                            
                                     else:
                                         #print(f"unsupported shape {shape['ShapeType']}")
                                         meshname=sector_Hash+'_'+shape['Hash']
@@ -1361,8 +1304,6 @@ def importSectors( filepath, with_mats, remap_depot, want_collisions, am_modding
                                         o.location = (loc[0],loc[1],loc[2])
                                         o.rotation_mode = "QUATERNION"
                                         o.rotation_quaternion = rot
-                                        if ssize:
-                                            o.scale = (ssize[0],ssize[1],ssize[2])
 
 
                     case _:

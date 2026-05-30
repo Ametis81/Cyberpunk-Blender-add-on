@@ -74,6 +74,74 @@ class CP7PhysImport(Operator):
         return {"RUNNING_MODAL"}
 
 
+# ====================== APPEARANCE DROP MENU ======================
+
+_appearance_cache = {}
+
+def get_appearance_items(self, context):
+    if not self.filepath:
+        return []
+
+    # Используем кэш, чтобы не читать файл каждый раз
+    if self.filepath in _appearance_cache:
+        return _appearance_cache[self.filepath]
+
+    if not os.path.exists(self.filepath):
+        return []
+
+    try:
+        with open(self.filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        root = data.get('Data', {}).get('RootChunk', {})
+        appearances = []
+
+        if 'appearances' in root:
+            for app in root.get('appearances', []):
+                if isinstance(app, dict):
+                    name = app.get('appearanceName', {}).get('$value')
+                    if name:
+                        appearances.append((name, name, f"Import appearance: {name}"))
+
+        _appearance_cache[self.filepath] = appearances
+        return appearances
+
+    except Exception as e:
+        print(f"[CP77] Error reading appearances: {e}")
+        return []
+
+
+def get_appearance_enum_items(self, context):
+    if not self.filepath:
+        return [("NONE", "No file selected", "")]
+
+    raw_items = get_appearance_items(self, context)
+
+    if not raw_items:
+        return [("NONE", "No appearances found", "")]
+
+    return [(item[0], item[0], item[2]) for item in raw_items]
+
+
+def update_filepath(self, context):
+    """Сбрасываем на первое appearance при смене файла"""
+    self.appearances = "default"
+
+    try:
+        items = get_appearance_enum_items(self, context)
+        if items:
+            self.property_unset("selected_appearance")
+            self["selected_appearance"] = items[0][0]
+        else:
+            self["selected_appearance"] = "NONE"
+    except:
+        self["selected_appearance"] = "NONE"
+
+    for area in context.screen.areas:
+        area.tag_redraw()
+
+# ===================================================
+
 class CP77EntityImport(Operator,ImportHelper):
 
     bl_idname = "io_scene_gltf.cp77entity"
@@ -86,7 +154,8 @@ class CP77EntityImport(Operator,ImportHelper):
         )
 
     filepath: StringProperty(name= "Filepath",
-                             subtype = 'FILE_PATH')
+                             subtype = 'FILE_PATH',
+                             update=update_filepath)
 
     appearances: StringProperty(name= "Appearances",
                                 description="Entity Appearances to extract. Needs appearanceName from ent. Comma seperate multiples",
@@ -108,15 +177,53 @@ class CP77EntityImport(Operator,ImportHelper):
                                 default='',
                                 options={'HIDDEN'})
   
+    # ====================== APPEARANCE BLOCK ==========================
+    
+    show_appearance_selection: BoolProperty(
+        name="Manual Appearance Selection",
+        default=False
+    )
+
+    selected_appearance: bpy.props.EnumProperty(
+        name="Appearance",
+        items=get_appearance_enum_items,
+    )
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        self.appearances = "default"
+        return {'RUNNING_MODAL'}
+    
+    #===================================================================
+    
     def draw(self, context):
         cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
         props = context.scene.cp77_panel_props
         layout = self.layout
-        row = layout.row(align=True)
-        split = row.split(factor=0.45,align=True)
-        split.label(text="Ent Appearance:")
-        split.prop(self, "appearances", text="")
-        row = layout.row(align=True)
+
+        box = layout.box()
+        box.label(text="Appearance Selection", icon='OUTLINER_OB_GROUP_INSTANCE')
+
+        row = box.row()
+        row.prop(self, "show_appearance_selection", text="Manual Appearance Selection", toggle=True)
+
+        if self.show_appearance_selection:
+            # === NEW PATH - DROPDOWN LIST ===
+            row = box.row()
+            row.operator("wm.redraw_timer", text="Refresh Appearances", icon='FILE_REFRESH').type = 'DRAW'
+        
+            col = box.column(align=True)
+            col.label(text=f"Total: {len(get_appearance_enum_items(self, context))} appearance(s)", icon='INFO')
+            col.separator()
+            col.label(text="Choose Appearance:", icon='DOWNARROW_HLT')
+            col.prop(self, "selected_appearance", text="")
+        else:
+            # === OLD PATH - TEXT FIELD ===
+            row = layout.row(align=True)
+            split = row.split(factor=0.45, align=True)
+            split.label(text="Ent Appearance:")
+            split.prop(self, "appearances", text="")
+
         box = layout.box()
         col = box.column()
         col.prop(props, "with_materials")        
@@ -152,15 +259,14 @@ class CP77EntityImport(Operator,ImportHelper):
         props = context.scene.cp77_panel_props
         SetCyclesRenderer(props.use_cycles, props.update_gi)
 
-        apps=self.appearances.split(",")
-        print('apps - ',apps)
-        excluded=""
-        bob=self.filepath
-        inColl=self.inColl
-        #print('Bob - ',bob)
-        importEnt(props.with_materials, bob, apps, excluded, self.include_collisions, self.include_phys, self.include_entCollider, inColl, props.remap_depot, 
-                    meshes=None, mesh_jsons=None, escaped_path=None, app_path=None, anim_files=None, rigjsons=None, generate_overrides=self.generate_overrides)
+        if self.show_appearance_selection and self.selected_appearance:
+            apps = [self.selected_appearance]
+        else:
+            apps = [a.strip() for a in self.appearances.split(",") if a.strip()]
 
+        importEnt(props.with_materials, self.filepath, apps, "", 
+                  self.include_collisions, self.include_phys, self.include_entCollider,
+                  self.inColl, props.remap_depot, generate_overrides=self.generate_overrides)
         return {'FINISHED'}
 
 

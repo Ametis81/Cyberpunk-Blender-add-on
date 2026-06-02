@@ -507,8 +507,6 @@ class CP77Import(Operator, ImportHelper):
     scripting: BoolProperty(default=False, options={'HIDDEN'})
     import_tracks: BoolProperty(default=True)
 
-    _appearance_list_updated_for_file: StringProperty(default="")
-
     def update_appearance_list(self):
         """Populate appearance list from GLB file metadata"""
         self.appearance_list.clear()
@@ -539,9 +537,11 @@ class CP77Import(Operator, ImportHelper):
         layout = self.layout
 
         # Update appearance list only when filepath changes
-        if self.filepath and self._appearance_list_updated_for_file != self.filepath:
-            self.update_appearance_list()
-            self._appearance_list_updated_for_file = self.filepath
+        if self.filepath:
+            last_filepath = getattr(self, '_appearance_list_updated_for_file', '')
+            if last_filepath != self.filepath:
+                self.update_appearance_list()
+                self._appearance_list_updated_for_file = self.filepath
 
         box = layout.box()
         box.label(text="Mesh Appearance", icon='OUTLINER_OB_GROUP_INSTANCE')

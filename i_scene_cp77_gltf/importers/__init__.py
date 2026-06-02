@@ -455,6 +455,10 @@ def update_glb_filepath(self, context):
         else:
             self["selected_appearance"] = "all"
 
+        # Call update_appearance_list ONLY if context is valid
+        if context:
+            self.update_appearance_list()
+
     except Exception as e:
         print(f"[CP77] update_glb_filepath error: {e}")
         self["selected_appearance"] = "all"
@@ -535,13 +539,6 @@ class CP77Import(Operator, ImportHelper):
         cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
         props = context.scene.cp77_panel_props
         layout = self.layout
-
-        # Update appearance list only when filepath changes
-        if self.filepath:
-            last_filepath = getattr(self, '_appearance_list_updated_for_file', '')
-            if last_filepath != self.filepath:
-                self.update_appearance_list()
-                self._appearance_list_updated_for_file = self.filepath
 
         box = layout.box()
         box.label(text="Mesh Appearance", icon='OUTLINER_OB_GROUP_INSTANCE')

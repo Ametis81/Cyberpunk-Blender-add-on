@@ -526,7 +526,7 @@ class CP77Import(Operator, ImportHelper):
         # Add "all" option for importing all appearances
         all_item = self.appearance_list.add()
         all_item.name = "all"
-        all_item.selected = False
+        all_item.selected = True
 
         # Add individual appearances
         for name in sorted(names, key=str.lower):

@@ -455,10 +455,6 @@ def update_glb_filepath(self, context):
         else:
             self["selected_appearance"] = "all"
 
-        # Only call if method exists and context is available
-        if context and hasattr(self, 'update_appearance_list'):
-            self.update_appearance_list()
-
     except Exception as e:
         print(f"[CP77] update_glb_filepath error: {e}")
         self["selected_appearance"] = "all"
@@ -511,7 +507,10 @@ class CP77Import(Operator, ImportHelper):
     scripting: BoolProperty(default=False, options={'HIDDEN'})
     import_tracks: BoolProperty(default=True)
 
+    _appearance_list_updated_for_file: StringProperty(default="")
+
     def update_appearance_list(self):
+        """Populate appearance list from GLB file metadata"""
         self.appearance_list.clear()
         names = get_gltf_appearance_items(self, bpy.context)
 
@@ -538,6 +537,11 @@ class CP77Import(Operator, ImportHelper):
         cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
         props = context.scene.cp77_panel_props
         layout = self.layout
+
+        # Update appearance list only when filepath changes
+        if self.filepath and self._appearance_list_updated_for_file != self.filepath:
+            self.update_appearance_list()
+            self._appearance_list_updated_for_file = self.filepath
 
         box = layout.box()
         box.label(text="Mesh Appearance", icon='OUTLINER_OB_GROUP_INSTANCE')

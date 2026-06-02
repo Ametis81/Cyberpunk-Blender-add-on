@@ -4,7 +4,7 @@ import os
 import json
 import re
 from bpy_extras.io_utils import ImportHelper
-from bpy.props import (StringProperty, EnumProperty, BoolProperty, CollectionProperty)
+from bpy.props import (StringProperty, EnumProperty, BoolProperty, CollectionProperty, IntProperty)
 from bpy.types import (Operator, OperatorFileListElement, TOPBAR_MT_file_import )
 from .import_with_materials import *
 from .entity_import import *
@@ -20,6 +20,7 @@ from .npz_import import (CP77CharacterShapeProps, CP77_OT_NpzImportMesh, CP77_OT
 
 _appearance_enum_cache = [("default", "default", "Use default appearance")]
 _last_selected_appearance = {}
+_gltf_appearance_cache = {}
 
 class AppearanceItem(PropertyGroup):
     name: StringProperty()
@@ -416,14 +417,14 @@ def clean_appearance_name(name):
     return re.sub(r'\d+$', '', name).strip()
 
 def get_gltf_appearance_enum_items(self, context):
-    global _appearance_enum_cache
+    global _gltf_appearance_cache
 
     if not self.filepath or not os.path.isfile(self.filepath):
-        _appearance_enum_cache = [("SELECT_FILE", "Select file", "Please select a .glb/.gltf file")]
-        return _appearance_enum_cache
+        return [("SELECT_FILE", "Select file", "Please select a .glb/.gltf file")]
 
-    if self.filepath in _appearance_enum_cache:
-        return _appearance_enum_cache[self.filepath]
+    # Check cache using filepath as key
+    if self.filepath in _gltf_appearance_cache:
+        return _gltf_appearance_cache[self.filepath]
 
     names = get_gltf_appearance_items(self, context)
 
@@ -441,8 +442,9 @@ def get_gltf_appearance_enum_items(self, context):
             clean_name = clean_appearance_name(name)
             result.append((name, clean_name, f"Import appearance: {clean_name}"))
 
-    _appearance_enum_cache = result
-    return _appearance_enum_cache
+    # Store in dictionary with filepath as key
+    _gltf_appearance_cache[self.filepath] = result
+    return result
 
 def update_glb_filepath(self, context):
     try:
@@ -453,14 +455,17 @@ def update_glb_filepath(self, context):
         else:
             self["selected_appearance"] = "all"
 
-        self.update_appearance_list()
+        # Only call if method exists and context is available
+        if context and hasattr(self, 'update_appearance_list'):
+            self.update_appearance_list()
 
     except Exception as e:
-        print(f"[CP77] update_filepath error: {e}")
+        print(f"[CP77] update_glb_filepath error: {e}")
         self["selected_appearance"] = "all"
 
-    for area in context.screen.areas:
-        area.tag_redraw()
+    if context and context.screen:
+        for area in context.screen.areas:
+            area.tag_redraw()
 
 def update_appearances_logic(self, context):
     if self.all_appearances_toggle:
@@ -478,7 +483,7 @@ class CP77Import(Operator, ImportHelper):
     filter_glob: StringProperty(default="*.gltf;*.glb", options={'HIDDEN'})
     filepath: StringProperty(subtype='FILE_PATH', update=update_glb_filepath)
     files: CollectionProperty(type=OperatorFileListElement)
-    directory: StringProperty()
+    directory: StringProperty(subtype='FILE_PATH')
 
     show_appearance_selection: BoolProperty(default=True)
     appearance_list: CollectionProperty(type=AppearanceItem)
@@ -508,7 +513,7 @@ class CP77Import(Operator, ImportHelper):
 
     def update_appearance_list(self):
         self.appearance_list.clear()
-        names = get_gltf_appearance_items(self, context=None)
+        names = get_gltf_appearance_items(self, bpy.context)
 
         if not names:
             return

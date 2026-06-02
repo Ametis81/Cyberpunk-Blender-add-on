@@ -447,6 +447,7 @@ def get_gltf_appearance_enum_items(self, context):
     return result
 
 def update_glb_filepath(self, context):
+    """Update appearance enum when filepath changes - doesn't touch the list"""
     try:
         items = get_gltf_appearance_enum_items(self, context)
 
@@ -454,10 +455,6 @@ def update_glb_filepath(self, context):
             self["selected_appearance"] = items[0][0]
         else:
             self["selected_appearance"] = "all"
-
-        # Call update_appearance_list ONLY if context is valid
-        if context:
-            self.update_appearance_list()
 
     except Exception as e:
         print(f"[CP77] update_glb_filepath error: {e}")
@@ -524,21 +521,31 @@ class CP77Import(Operator, ImportHelper):
             item = self.appearance_list.add()
             item.name = clean_name
             item.selected = True
-        else:
-            item = self.appearance_list.add()
-            item.name = "all"
-            item.selected = False
+            return
 
-            for name in sorted(names, key=str.lower):
-                clean_name = clean_appearance_name(name)
-                item = self.appearance_list.add()
-                item.name = clean_name
-                item.selected = False
+        # Add "all" option for importing all appearances
+        all_item = self.appearance_list.add()
+        all_item.name = "all"
+        all_item.selected = False
+
+        # Add individual appearances
+        for name in sorted(names, key=str.lower):
+            clean_name = clean_appearance_name(name)
+            item = self.appearance_list.add()
+            item.name = clean_name
+            item.selected = False
 
     def draw(self, context):
         cp77_addon_prefs = bpy.context.preferences.addons['i_scene_cp77_gltf'].preferences
         props = context.scene.cp77_panel_props
         layout = self.layout
+
+        # Update appearance list only when filepath changes
+        if self.filepath:
+            last_filepath = getattr(self, '_last_filepath', '')
+            if last_filepath != self.filepath:
+                self.update_appearance_list()
+                self._last_filepath = self.filepath
 
         box = layout.box()
         box.label(text="Mesh Appearance", icon='OUTLINER_OB_GROUP_INSTANCE')

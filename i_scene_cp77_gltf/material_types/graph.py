@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from collections import defaultdict
 
@@ -582,10 +583,12 @@ def safe_unit_interval(value, fallback=0.5, epsilon=1.0e-5):
     return max(epsilon, min(1.0 - epsilon, value))
 
 
-_LAYOUT_VERSION = 3
+_LAYOUT_VERSION = 4
 _LAYOUT_COLUMN_GAP = 140.0
 _LAYOUT_ROW_GAP = 70.0
-_LAYOUT_MIN_ROW_STEP = 180.0
+_LAYOUT_MIN_NODE_HEIGHT = 60.0
+_LAYOUT_GRID = 20.0
+_LAYOUT_TOP = 720.0
 _LAYOUT_MATERIAL_RIGHT_EDGE = 640.0
 _LAYOUT_GROUP_RIGHT_EDGE = 0.0
 
@@ -743,36 +746,110 @@ def _layout_stage(node):
     return "Processing"
 
 
+# Blender's node.height is a stored default (about 100) rather than the drawn height, and node.dimensions stays
+# zero until a node editor draws the node (and then scales with the UI), so the drawn height is estimated from
+# what the node shows.
+_NODE_HEADER_HEIGHT = 36.0
+_NODE_SOCKET_ROW = 22.0
+_NODE_BUTTON_ROW = 24.0
+_NODE_BOTTOM_PADDING = 8.0
+_REROUTE_SIZE = 20.0
+
+# Rows of buttons (dropdowns, checkboxes, data-block selectors) a node draws above its sockets.
+_NODE_BUTTON_ROWS = {
+    "ShaderNodeMath": 2,
+    "ShaderNodeVectorMath": 1,
+    "ShaderNodeMix": 3,
+    "ShaderNodeMixRGB": 2,
+    "ShaderNodeTexImage": 4,
+    "ShaderNodeTexEnvironment": 4,
+    "ShaderNodeSeparateColor": 1,
+    "ShaderNodeCombineColor": 1,
+    "ShaderNodeMapping": 1,
+    "ShaderNodeNormalMap": 2,
+    "ShaderNodeBump": 1,
+    "ShaderNodeMapRange": 3,
+    "ShaderNodeClamp": 1,
+    "ShaderNodeAttribute": 2,
+    "ShaderNodeVertexColor": 1,
+    "ShaderNodeUVMap": 1,
+    "ShaderNodeTexCoord": 1,
+    "ShaderNodeTangent": 2,
+    "ShaderNodeVectorRotate": 2,
+    "ShaderNodeVectorTransform": 3,
+    "ShaderNodeTexNoise": 2,
+    "ShaderNodeTexVoronoi": 3,
+    "ShaderNodeTexWave": 3,
+    "ShaderNodeTexWhiteNoise": 1,
+    "ShaderNodeTexGradient": 1,
+    "ShaderNodeBsdfPrincipled": 2,
+    "ShaderNodeGroup": 1,
+    "ShaderNodeValue": 1,
+}
+
+# Extra height for widgets that are taller than a row: a colour ramp's gradient, an RGB node's colour wheel,
+# the collapsed panel headers of the Principled BSDF.
+_NODE_EXTRA_HEIGHT = {
+    "ShaderNodeValToRGB": 150.0,
+    "ShaderNodeRGB": 170.0,
+    "ShaderNodeBsdfPrincipled": 7 * _NODE_SOCKET_ROW,
+    "ShaderNodeCurveRGB": 200.0,
+    "ShaderNodeFloatCurve": 200.0,
+    "ShaderNodeVectorCurve": 200.0,
+}
+
+# Principled BSDF inputs drawn outside its (collapsed) panels.
+_PRINCIPLED_TOP_LEVEL_INPUTS = frozenset(
+    {"Base Color", "Metallic", "Roughness", "IOR", "Alpha", "Normal", "Weight"}
+)
+
+
+def _socket_visible(socket):
+    if getattr(socket, "hide", False) or getattr(socket, "is_unavailable", False):
+        return False
+    return bool(getattr(socket, "enabled", True))
+
+
+def _input_rows(socket):
+    if getattr(socket, "is_linked", False) or getattr(socket, "hide_value", False):
+        return 1
+    # An unlinked vector input draws its three fields below its label.
+    return 4 if getattr(socket, "type", "") == "VECTOR" else 1
+
+
 def _node_height(node):
-    try:
-        value = float(node.height)
-    except (ReferenceError, RuntimeError, ValueError):
-        value = 0.0
-    if getattr(node, "bl_idname", "") in {
-        "ShaderNodeGroup",
-        "NodeGroupInput",
-        "NodeGroupOutput",
-    }:
-        rows = 0
-        for is_input, collection in ((True, node.inputs), (False, node.outputs)):
-            for socket in collection:
-                if getattr(socket, "hide", False) or getattr(
-                    socket, "is_unavailable", False
-                ):
-                    continue
-                rows += 1
-                if (
-                    is_input
-                    and getattr(socket, "type", "") == "VECTOR"
-                    and not getattr(socket, "is_linked", False)
-                    and not getattr(socket, "hide_value", False)
-                ):
-                    rows += 3
-        value = max(value, 80.0 + 24.0 * rows)
-    return max(_LAYOUT_MIN_ROW_STEP - _LAYOUT_ROW_GAP, value)
+    node_type = getattr(node, "bl_idname", "")
+    if node_type == "NodeReroute":
+        return _REROUTE_SIZE
+    principled = node_type == "ShaderNodeBsdfPrincipled"
+    rows = 0
+    for socket in node.outputs:
+        if _socket_visible(socket):
+            rows += 1
+    for socket in node.inputs:
+        if not _socket_visible(socket):
+            continue
+        if (
+            principled
+            and getattr(socket, "name", "") not in _PRINCIPLED_TOP_LEVEL_INPUTS
+        ):
+            continue
+        rows += _input_rows(socket)
+    value = (
+        _NODE_HEADER_HEIGHT
+        + _NODE_SOCKET_ROW * rows
+        + _NODE_BUTTON_ROW * _NODE_BUTTON_ROWS.get(node_type, 0)
+        + _NODE_EXTRA_HEIGHT.get(node_type, 0.0)
+        + _NODE_BOTTOM_PADDING
+    )
+    if node_type == "ShaderNodeTexImage" and getattr(node, "image", None) is not None:
+        value += _NODE_BUTTON_ROW
+    return max(_LAYOUT_MIN_NODE_HEIGHT, value)
 
 
 def _node_width(node):
+    if getattr(node, "bl_idname", "") == "NodeReroute":
+        return _REROUTE_SIZE
     try:
         value = float(node.width)
     except (ReferenceError, RuntimeError, ValueError):
@@ -944,36 +1021,77 @@ def _layout_node_tree(
         rightmost = column_x[max(column_x)]
         shift = float(right_edge) - rightmost
         for column in column_x:
-            column_x[column] += shift
+            column_x[column] = _LAYOUT_GRID * round(
+                (column_x[column] + shift) / _LAYOUT_GRID
+            )
 
     for column in ordered_columns:
         column_nodes = by_column[column]
 
-        def row_order(pointer):
+        def wanted_top(pointer):
+            # Line a node up with the nodes feeding it, so its links run as straight as possible.
             upstream = [
                 placed_y[source]
                 for source in predecessors[pointer]
                 if source in placed_y
             ]
-            center = (
-                sum(upstream) / len(upstream)
-                if upstream
-                else original_locations[pointer][1]
-            )
+            if upstream:
+                return sum(upstream) / len(upstream)
+            return None
+
+        def row_order(pointer):
+            wanted = wanted_top(pointer)
             return (
-                -center,
+                -(wanted if wanted is not None else original_locations[pointer][1]),
                 -original_locations[pointer][1],
                 sort_names[pointer][0],
                 sort_names[pointer][1],
             )
 
         column_nodes.sort(key=row_order)
-        y = 720.0
+        # Each node goes as high as its sources ask, but never above the bottom of the node placed before it.
+        floor = _LAYOUT_TOP
         for pointer in column_nodes:
+            wanted = wanted_top(pointer)
+            y = floor if wanted is None else min(floor, wanted)
+            y = _LAYOUT_GRID * math.floor(y / _LAYOUT_GRID)
             placed_y[pointer] = y
             target_locations[pointer] = (column_x[column], y)
             placement_order.append(pointer)
-            y -= dimensions[pointer][1] + _LAYOUT_ROW_GAP
+            floor = y - dimensions[pointer][1] - _LAYOUT_ROW_GAP
+
+    # Nodes nothing feeds (values, colours, coordinates) move next to the nodes they feed, right to left so a
+    # chain of them follows its consumer.
+    successors = {pointer: [] for pointer in pointers}
+    for source, target in edges:
+        successors[source].append(target)
+    for column in reversed(ordered_columns):
+        column_nodes = by_column[column]
+        if not any(
+            not predecessors[pointer] and successors[pointer]
+            for pointer in column_nodes
+        ):
+            continue
+
+        def wanted_in_column(pointer):
+            if not predecessors[pointer] and successors[pointer]:
+                downstream = [
+                    placed_y[target]
+                    for target in successors[pointer]
+                    if target in placed_y
+                ]
+                if downstream:
+                    return sum(downstream) / len(downstream)
+            return placed_y[pointer]
+
+        wanted = {pointer: wanted_in_column(pointer) for pointer in column_nodes}
+        column_nodes.sort(key=lambda pointer: (-wanted[pointer], sort_names[pointer]))
+        floor = max(_LAYOUT_TOP, max(wanted.values()))
+        for pointer in column_nodes:
+            y = _LAYOUT_GRID * math.floor(min(floor, wanted[pointer]) / _LAYOUT_GRID)
+            placed_y[pointer] = y
+            target_locations[pointer] = (column_x[column], y)
+            floor = y - dimensions[pointer][1] - _LAYOUT_ROW_GAP
     timings["placement_prepare"] += time.perf_counter() - phase_started
 
     phase_started = time.perf_counter()

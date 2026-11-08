@@ -813,7 +813,29 @@ def _tree_links(tree, node_pointers):
     return tuple(edges)
 
 
-def _layout_node_tree(tree, *, right_edge, recursive, visited, timings):
+# A tree counts as laid out by its builder when at most this share of its nodes sit on the same spot as another.
+_AUTHORED_LAYOUT_MAX_STACKED = 0.25
+
+
+def has_authored_layout(nodes):
+    """Whether a builder placed these nodes itself, rather than leaving them stacked for the layout pass"""
+    nodes = list(nodes)
+    if len(nodes) < 2:
+        return True
+    spots = defaultdict(int)
+    for node in nodes:
+        try:
+            x, y = _absolute_location(node)
+        except (ReferenceError, RuntimeError, TypeError, ValueError):
+            return False
+        spots[(round(x), round(y))] += 1
+    stacked = sum(count for count in spots.values() if count > 1)
+    return stacked / len(nodes) <= _AUTHORED_LAYOUT_MAX_STACKED
+
+
+def _layout_node_tree(
+    tree, *, right_edge, recursive, visited, timings, preserve_authored=False
+):
     tree_pointer = rna_identity(tree)
     if tree_pointer in visited:
         return {"nodes": 0, "links": 0, "cycles": 0, "backward_links": 0}
@@ -853,7 +875,17 @@ def _layout_node_tree(tree, *, right_edge, recursive, visited, timings):
                 recursive=True,
                 visited=visited,
                 timings=timings,
+                preserve_authored=preserve_authored,
             )
+
+    if preserve_authored and has_authored_layout(nodes):
+        # Keep the positions the builder chose; only trees it left stacked get the column layout.
+        return {
+            "nodes": len(nodes),
+            "links": len(tree.links),
+            "cycles": 0,
+            "backward_links": 0,
+        }
 
     phase_started = time.perf_counter()
     pointers = tuple(rna_identity(node) for node in nodes)
@@ -982,7 +1014,7 @@ def _layout_node_tree(tree, *, right_edge, recursive, visited, timings):
     }
 
 
-def organize_material_groups(material):
+def organize_material_groups(material, *, preserve_authored=False):
     """Lay out the node groups a material's tree uses that are not laid out yet"""
     tree = getattr(material, "node_tree", None)
     if tree is None:
@@ -1009,11 +1041,16 @@ def organize_material_groups(material):
             recursive=True,
             visited=visited,
             timings=timings,
+            preserve_authored=preserve_authored,
         )
 
 
-def organize_material_graph(material, *, bundled=None):
-    """Bundle the principled surface links and lay the graph out"""
+def organize_material_graph(material, *, bundled=None, preserve_authored=False):
+    """Bundle the principled surface links and lay the graph out
+
+    With preserve_authored the surface links stay unbundled and only trees whose builder left their nodes stacked
+    are laid out; every other tree keeps the positions its builder chose.
+    """
     tree = getattr(material, "node_tree", None)
     if tree is None or not len(tree.nodes):
         return {"nodes": 0, "links": 0, "cycles": 0, "backward_links": 0}
@@ -1035,7 +1072,9 @@ def organize_material_graph(material, *, bundled=None):
         "placement_write_scalar": 0.0,
         "metadata": 0.0,
     }
-    if bundled is None:
+    if preserve_authored and bundled is None:
+        bundle_stats = {}
+    elif bundled is None:
         phase_started = time.perf_counter()
         bundle_stats = bundle_principled_surface_links(material)
         timings["bundle"] += time.perf_counter() - phase_started
@@ -1051,6 +1090,7 @@ def organize_material_graph(material, *, bundled=None):
         recursive=True,
         visited=set(),
         timings=timings,
+        preserve_authored=preserve_authored,
     )
     stats["surface_bundles"] = int(bundle_stats.get("bundled", 0))
     stats["surface_bundle_channels"] = int(bundle_stats.get("channels", 0))

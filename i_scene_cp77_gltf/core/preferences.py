@@ -41,6 +41,26 @@ class CP77IOSuitePreferences(AddonPreferences):
         options={"HIDDEN"},
         default="",
     )
+    material_node_layout: EnumProperty(
+        name="Material Node Layout",
+        description="How imported material node graphs are arranged",
+        items=(
+            (
+                "AUTO",
+                "Auto-arrange",
+                "Lay out every material and its node groups in left-to-right columns and bundle the "
+                "Principled BSDF inputs",
+            ),
+            (
+                "PRESERVE",
+                "Keep Authored Layout",
+                "Keep the node positions each shader sets up; only node groups whose nodes are left stacked "
+                "are arranged. Node groups already arranged in this file keep their arrangement",
+            ),
+        ),
+        default="AUTO",
+    )
+
     show_modtools: BoolProperty(
         name="Show Mod Tools",
         description="Show the Mod tools Tab in the 3d viewport",
@@ -125,6 +145,10 @@ class CP77IOSuitePreferences(AddonPreferences):
         row = box.row()
         row.prop(self, "show_modtools", toggle=1)
         row.prop(self, "experimental_features", toggle=1)
+
+        box = layout.box()
+        box.label(text="Materials")
+        box.prop(self, "material_node_layout")
 
         log_box = layout.box()
         log_box.label(text="Logging")

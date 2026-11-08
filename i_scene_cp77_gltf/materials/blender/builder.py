@@ -136,11 +136,13 @@ def _bundle_surface_links(material):
     return stats
 
 
-def _organize_material_graph(material, bundled=None):
+def _organize_material_graph(material, bundled=None, *, preserve_authored=False):
     if bundled is _BUNDLING_FAILED:
         return {}
     try:
-        stats = organize_material_graph(material, bundled=bundled)
+        stats = organize_material_graph(
+            material, bundled=bundled, preserve_authored=preserve_authored
+        )
         if stats.get("cycles") or stats.get("backward_links"):
             _LOG.debug(
                 "Material graph layout for %s is not strictly left-to-right: "
@@ -182,9 +184,12 @@ def _signature_prefix(
     blender_version,
     addon_version,
     experimental_features,
+    preserve_layout=False,
 ):
     return json.dumps(
         {
+            # Materials built under one layout setting are not reused under the other.
+            "preserve_layout": bool(preserve_layout),
             "cache_version": _MATERIAL_CACHE_VERSION,
             "base_path": absolute_local_path_key(base_path),
             "project_path": absolute_local_path_key(project_path),
@@ -225,6 +230,11 @@ class MaterialBuilder:
             if preferences is not None
             else False
         )
+        self.preserve_layout = (
+            getattr(preferences, "material_node_layout", "AUTO") == "PRESERVE"
+            if preferences is not None
+            else False
+        )
         self._signature_cache = {}
         self._raw_digest_cache = {}
         self._semantic_identity_cache = {}
@@ -236,6 +246,7 @@ class MaterialBuilder:
             tuple(bpy.app.version),
             tuple(self.addon_ver),
             self.experimental_features,
+            self.preserve_layout,
         )
 
     def _signature(
@@ -528,7 +539,9 @@ class MaterialBuilder:
             self._set_material_source_properties(material, raw_material)
             with outputs_detached(material.node_tree):
                 handler.apply_structure_values(raw_material["Data"], material, slots)
-                organize_material_groups(material)
+                organize_material_groups(
+                    material, preserve_authored=self.preserve_layout
+                )
                 _refresh_copied_tree(material)
         except Exception:
             _LOG.debug(
@@ -636,7 +649,9 @@ class MaterialBuilder:
                     embedded_textures_of(self.MeshPath),
                 ):
                     instance.create(create_data, bpyMat)
-                    bundled = _bundle_surface_links(bpyMat)
+                    bundled = (
+                        None if self.preserve_layout else _bundle_surface_links(bpyMat)
+                    )
             finally:
                 _record_material_handler_timing(
                     handler_name,
@@ -656,7 +671,9 @@ class MaterialBuilder:
             coarse_organization_started = time.perf_counter()
             organization_stats = {}
             try:
-                organization_stats = _organize_material_graph(bpyMat, bundled)
+                organization_stats = _organize_material_graph(
+                    bpyMat, bundled, preserve_authored=self.preserve_layout
+                )
             finally:
                 _record_material_organization_phases(
                     organization_stats.get("timings", {})
@@ -874,7 +891,7 @@ class MaterialBuilder:
                 )
                 unknown.create(rawMat["Data"], bpyMat)
 
-            _organize_material_graph(bpyMat)
+            _organize_material_graph(bpyMat, preserve_authored=self.preserve_layout)
             _set_hashed_render_method(bpyMat)
             bpyMat["cp77_no_shadows"] = False
             return _cache_material(
@@ -967,7 +984,7 @@ class MaterialBuilder:
                 )
             else:
                 _LOG.warning("Unhandled decal - missing baseMaterial DepotPath")
-                _organize_material_graph(bpyMat)
+                _organize_material_graph(bpyMat, preserve_authored=self.preserve_layout)
                 _set_hashed_render_method(bpyMat)
             return _cache_material(
                 signature,

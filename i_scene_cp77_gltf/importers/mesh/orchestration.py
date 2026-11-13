@@ -70,6 +70,7 @@ from .scene import (
     import_mesh_glb,
     source_frame_attributes_available,
 )
+from .terrain_normals import apply_terrain_normals
 from .terrain_uv import apply_terrain_generated_uvs
 
 _LOG = get_logger(__name__)
@@ -1433,6 +1434,7 @@ def import_cyberpunk_glb(
                             mats,
                             material_names_by_submesh,
                         )
+                        apply_terrain_normals(result)
 
                     if with_materials:
                         if not has_material_json:
